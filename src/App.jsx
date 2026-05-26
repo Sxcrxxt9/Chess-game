@@ -1,22 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
-import {
-  Clipboard,
-  Flag,
-  Handshake,
-  History,
-  MessageSquare,
-  Plus,
-  RotateCcw,
-  Send,
-  Share2,
-  Swords,
-  Users
-} from 'lucide-react';
 
-const apiBase =
-  import.meta.env.VITE_SERVER_URL ||
-  (window.location.port === '5173' ? 'http://localhost:3001' : window.location.origin);
+const apiBase = window.location.origin;
 
 const pieces = {
   wp: '♙',
@@ -41,15 +25,45 @@ const promotionPieces = [
   { value: 'n', label: 'Knight' }
 ];
 
-function getStoredIdentity() {
-  const existingId = window.localStorage.getItem('chess-client-id');
-  const clientId = existingId || crypto.randomUUID();
-  if (!existingId) window.localStorage.setItem('chess-client-id', clientId);
+const iconGlyphs = {
+  clipboard: '[]',
+  flag: '|>',
+  handshake: '<>',
+  history: '@',
+  message: '#',
+  plus: '+',
+  rotate: '↻',
+  send: '>',
+  share: '<',
+  swords: 'X',
+  users: 'oo'
+};
 
+function Icon({ name }) {
+  return (
+    <span className="ui-icon" aria-hidden="true">
+      {iconGlyphs[name]}
+    </span>
+  );
+}
+
+function getStoredIdentity() {
   return {
-    clientId,
+    clientId: crypto.randomUUID(),
     name: window.localStorage.getItem('chess-player-name') || ''
   };
+}
+
+function normalizeRoomInput(value) {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+
+  try {
+    const invite = new URL(trimmed);
+    return invite.searchParams.get('room') || '';
+  } catch {
+    return trimmed;
+  }
 }
 
 function getInitialRoomId() {
@@ -97,37 +111,52 @@ function App() {
   const [flipped, setFlipped] = useState(false);
   const [connected, setConnected] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const socketRef = useRef(null);
+  const eventsRef = useRef(null);
 
   useEffect(() => {
     window.localStorage.setItem('chess-player-name', name);
   }, [name]);
 
   useEffect(() => {
-    const socket = io(apiBase, { transports: ['websocket', 'polling'] });
-    socketRef.current = socket;
+    if (!roomId) return undefined;
 
-    socket.on('connect', () => setConnected(true));
-    socket.on('disconnect', () => setConnected(false));
+    let cancelled = false;
 
-    socket.on('room:state', (nextRoom) => {
-      setRoom(nextRoom);
-      setRoomReceivedAt(Date.now());
-      setSelected(null);
-      setPendingPromotion(null);
-    });
+    async function joinAndSubscribe() {
+      try {
+        await postRoomAction(roomId, 'join', { clientId, name });
+        if (cancelled) return;
 
-    socket.on('room:error', (error) => {
-      setNotice(error.message || 'Something went wrong');
-    });
+        eventsRef.current?.close();
+        const stream = new EventSource(`${apiBase}/api/rooms/${roomId}/events?clientId=${encodeURIComponent(clientId)}`);
+        eventsRef.current = stream;
 
-    return () => socket.disconnect();
-  }, []);
+        stream.addEventListener('open', () => setConnected(true));
+        stream.addEventListener('error', () => setConnected(false));
+        stream.addEventListener('room:state', (event) => {
+          const nextRoom = JSON.parse(event.data);
+          setRoom(nextRoom);
+          setRoomReceivedAt(Date.now());
+          setSelected(null);
+          setPendingPromotion(null);
+        });
+      } catch {
+        if (!cancelled) {
+          setConnected(false);
+          setNotice('Cannot reach the game server');
+        }
+      }
+    }
 
-  useEffect(() => {
-    if (!roomId || !socketRef.current?.connected) return;
-    socketRef.current.emit('room:join', { roomId, clientId, name });
-  }, [clientId, connected, name, roomId]);
+    joinAndSubscribe();
+
+    return () => {
+      cancelled = true;
+      eventsRef.current?.close();
+      eventsRef.current = null;
+      setConnected(false);
+    };
+  }, [clientId, name, roomId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 500);
@@ -141,13 +170,18 @@ function App() {
   const inviteUrl = room ? `${window.location.origin}${window.location.pathname}?room=${room.id}` : '';
 
   async function createRoom() {
-    const response = await fetch(`${apiBase}/api/rooms`, { method: 'POST' });
-    const payload = await response.json();
-    enterRoom(payload.room.id);
+    try {
+      const response = await fetch(`${apiBase}/api/rooms`, { method: 'POST' });
+      if (!response.ok) throw new Error('Unable to create room');
+      const payload = await response.json();
+      enterRoom(payload.room.id);
+    } catch {
+      setNotice('Cannot reach the game server');
+    }
   }
 
   function enterRoom(nextRoomId) {
-    const trimmed = nextRoomId.trim();
+    const trimmed = normalizeRoomInput(nextRoomId);
     if (!trimmed) return;
 
     const url = new URL(window.location.href);
@@ -155,11 +189,26 @@ function App() {
     window.history.replaceState({}, '', url);
     setRoomId(trimmed);
     setRoom(null);
-    socketRef.current?.emit('room:join', { roomId: trimmed, clientId, name });
   }
 
-  function emit(eventName, payload = {}) {
-    socketRef.current?.emit(eventName, { roomId, clientId, ...payload });
+  async function postRoomAction(targetRoomId, action, payload = {}) {
+    const response = await fetch(`${apiBase}/api/rooms/${targetRoomId}/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  }
+
+  async function emit(eventName, payload = {}) {
+    const action = eventName.replace('room:', '');
+    try {
+      await postRoomAction(roomId, action, { clientId, ...payload });
+    } catch (error) {
+      setNotice(error.message || 'Something went wrong');
+    }
   }
 
   function handleSquare(square) {
@@ -210,7 +259,7 @@ function App() {
     <main className="app-shell">
       <section className="topbar" aria-label="Game navigation">
         <div className="brand">
-          <Swords size={24} />
+          <Icon name="swords" />
           <div>
             <strong>Online Chess Arena</strong>
             <span>Realtime rooms with server-side rules</span>
@@ -276,7 +325,7 @@ function Lobby({ joinInput, setJoinInput, createRoom, enterRoom, notice }) {
         </div>
         <div className="join-box">
           <button className="primary-action" onClick={createRoom}>
-            <Plus size={18} />
+            <Icon name="plus" />
             Create room
           </button>
           <div className="join-row">
@@ -325,11 +374,11 @@ function GameRoom({
           <div className="room-code">{room.id}</div>
           <div className="room-actions">
             <button title="Copy invite link" onClick={copyInvite}>
-              <Share2 size={17} />
+              <Icon name="share" />
               Invite
             </button>
             <button title="Flip board" onClick={() => setFlipped(!flipped)}>
-              <RotateCcw size={17} />
+              <Icon name="rotate" />
               Flip
             </button>
           </div>
@@ -352,7 +401,7 @@ function GameRoom({
         />
 
         <div className="table-line">
-          <Users size={17} />
+          <Icon name="users" />
           <span>{room.spectatorCount} spectators</span>
           <strong>{viewerRole}</strong>
         </div>
@@ -460,19 +509,19 @@ function ActionBar({ room, canAct, emit }) {
   return (
     <div className="action-bar">
       <button disabled={!canAct} onClick={() => emit('room:draw-offer')}>
-        <Handshake size={17} />
+        <Icon name="handshake" />
         {room.drawOfferBy ? 'Accept draw' : 'Offer draw'}
       </button>
       <button disabled={!canAct || !room.drawOfferBy} onClick={() => emit('room:draw-cancel')}>
-        <Clipboard size={17} />
+        <Icon name="clipboard" />
         Cancel draw
       </button>
       <button disabled={!canAct} onClick={() => emit('room:resign')}>
-        <Flag size={17} />
+        <Icon name="flag" />
         Resign
       </button>
       <button disabled={!gameOver} onClick={() => emit('room:rematch')}>
-        <RotateCcw size={17} />
+        <Icon name="rotate" />
         Rematch
       </button>
     </div>
@@ -492,7 +541,7 @@ function MoveList({ history }) {
   return (
     <section className="activity-card">
       <h2>
-        <History size={18} />
+        <Icon name="history" />
         Moves
       </h2>
       <div className="move-list">
@@ -516,7 +565,7 @@ function Chat({ room, chatInput, setChatInput, sendChat }) {
   return (
     <section className="activity-card chat-card">
       <h2>
-        <MessageSquare size={18} />
+        <Icon name="message" />
         Chat
       </h2>
       <div className="chat-log">
@@ -539,7 +588,7 @@ function Chat({ room, chatInput, setChatInput, sendChat }) {
           maxLength={240}
         />
         <button aria-label="Send message">
-          <Send size={17} />
+          <Icon name="send" />
         </button>
       </form>
     </section>

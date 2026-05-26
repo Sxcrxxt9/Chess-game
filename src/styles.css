@@ -102,8 +102,17 @@ input:focus {
   gap: 0.75rem;
 }
 
-.brand svg {
+.brand .ui-icon {
   color: #f1bd72;
+}
+
+.ui-icon {
+  display: inline-grid;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  place-items: center;
+  font-weight: 900;
+  line-height: 1;
 }
 
 .brand strong {

@@ -1,9 +1,7 @@
+import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import express from 'express';
-import cors from 'cors';
 import { createServer } from 'node:http';
-import { Server } from 'socket.io';
+import { fileURLToPath } from 'node:url';
 import { RoomStore } from './roomStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -11,126 +9,211 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
 const port = Number(process.env.PORT || 3001);
-const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
-
-const app = express();
-const server = createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: process.env.NODE_ENV === 'production' ? false : clientOrigin,
-    methods: ['GET', 'POST']
-  }
-});
 const rooms = new RoomStore();
+const streams = new Map();
 
-app.use(cors({ origin: process.env.NODE_ENV === 'production' ? false : clientOrigin }));
-app.use(express.json());
+const contentTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.ico': 'image/x-icon'
+};
 
-app.get('/api/health', (_request, response) => {
-  response.json({ ok: true, uptime: process.uptime() });
-});
+function sendJson(response, status, payload) {
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store'
+  });
+  response.end(JSON.stringify(payload));
+}
 
-app.get('/api/rooms', (_request, response) => {
-  response.json({ rooms: rooms.listRooms() });
-});
+function sendError(response, status, message) {
+  sendJson(response, status, { error: message });
+}
 
-app.post('/api/rooms', (_request, response) => {
-  const room = rooms.createRoom();
-  response.status(201).json({ room: rooms.serialize(room) });
-});
+function readBody(request) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 1_000_000) {
+        request.destroy();
+        reject(new Error('Payload too large'));
+      }
+    });
+    request.on('end', () => {
+      if (!body) {
+        resolve({});
+        return;
+      }
 
-app.get('/api/rooms/:roomId', (request, response) => {
-  const room = rooms.getRoom(request.params.roomId);
-  if (!room) {
-    response.status(404).json({ error: 'Room not found' });
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        reject(new Error('Invalid JSON body'));
+      }
+    });
+    request.on('error', reject);
+  });
+}
+
+function streamSet(roomId) {
+  if (!streams.has(roomId)) streams.set(roomId, new Set());
+  return streams.get(roomId);
+}
+
+function sendEvent(client, state) {
+  client.response.write(`event: room:state\ndata: ${JSON.stringify(state)}\n\n`);
+}
+
+function broadcastRoom(room) {
+  const clients = streams.get(room.id);
+  if (!clients) return;
+
+  for (const client of clients) {
+    sendEvent(client, rooms.serialize(room, client.clientId));
+  }
+}
+
+function serveStatic(request, response, url) {
+  if (process.env.NODE_ENV !== 'production') {
+    sendError(response, 404, 'Not found');
     return;
   }
 
-  rooms.updateClock(room);
-  response.json({ room: rooms.serialize(room) });
-});
-
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(distDir));
-  app.get('*', (_request, response) => {
-    response.sendFile(path.join(distDir, 'index.html'));
-  });
-}
-
-async function broadcastRoom(room) {
-  const sockets = await io.in(room.id).fetchSockets();
-  for (const roomSocket of sockets) {
-    roomSocket.emit('room:state', rooms.serialize(room, roomSocket.data.clientId));
+  const requestedPath = url.pathname === '/' ? '/index.html' : url.pathname;
+  const filePath = path.normalize(path.join(distDir, requestedPath));
+  if (!filePath.startsWith(distDir)) {
+    sendError(response, 403, 'Forbidden');
+    return;
   }
+
+  const fallbackPath = path.join(distDir, 'index.html');
+  const finalPath = fs.existsSync(filePath) && fs.statSync(filePath).isFile() ? filePath : fallbackPath;
+  response.writeHead(200, {
+    'Content-Type': contentTypes[path.extname(finalPath)] || 'application/octet-stream',
+    'Cache-Control': 'no-store'
+  });
+  fs.createReadStream(finalPath).pipe(response);
 }
 
-async function emitAction(socket, eventName, action) {
+async function handleRoomAction(request, response, roomId, action) {
   try {
-    const state = action();
-    const room = rooms.requiredRoom(state.id);
-    await broadcastRoom(room);
+    const body = await readBody(request);
+    const clientId = String(body.clientId || '');
+    let state;
+
+    if (action === 'join') {
+      state = rooms.joinRoom(roomId, { id: clientId }, body);
+    } else if (action === 'move') {
+      state = rooms.makeMove(roomId, clientId, body.move);
+    } else if (action === 'resign') {
+      state = rooms.resign(roomId, clientId);
+    } else if (action === 'draw-offer') {
+      state = rooms.offerDraw(roomId, clientId);
+    } else if (action === 'draw-cancel') {
+      state = rooms.cancelDraw(roomId, clientId);
+    } else if (action === 'rematch') {
+      state = rooms.requestRematch(roomId, clientId);
+    } else if (action === 'chat') {
+      state = rooms.addChat(roomId, clientId, body.text);
+    } else {
+      sendError(response, 404, 'Not found');
+      return;
+    }
+
+    broadcastRoom(rooms.requiredRoom(roomId));
+    sendJson(response, 200, { room: state });
   } catch (error) {
-    socket.emit('room:error', { event: eventName, message: error.message });
+    sendError(response, error.message === 'Room not found' ? 404 : 400, error.message);
   }
 }
 
-io.on('connection', (socket) => {
-  socket.on('room:join', (payload = {}) => {
-    emitAction(socket, 'room:join', () => {
-      const roomId = String(payload.roomId || '');
-      const room = rooms.requiredRoom(roomId);
-      socket.data.clientId = String(payload.clientId || socket.id);
-      socket.join(room.id);
-      return rooms.joinRoom(room.id, socket, payload);
-    });
-  });
+const server = createServer(async (request, response) => {
+  const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  const parts = url.pathname.split('/').filter(Boolean);
 
-  socket.on('room:move', (payload = {}) => {
-    emitAction(socket, 'room:move', () => {
-      return rooms.makeMove(payload.roomId, payload.clientId, payload.move);
-    });
-  });
+  if (parts[0] !== 'api') {
+    serveStatic(request, response, url);
+    return;
+  }
 
-  socket.on('room:resign', (payload = {}) => {
-    emitAction(socket, 'room:resign', () => {
-      return rooms.resign(payload.roomId, payload.clientId);
-    });
-  });
+  if (request.method === 'GET' && url.pathname === '/api/health') {
+    sendJson(response, 200, { ok: true, uptime: process.uptime() });
+    return;
+  }
 
-  socket.on('room:draw-offer', (payload = {}) => {
-    emitAction(socket, 'room:draw-offer', () => {
-      return rooms.offerDraw(payload.roomId, payload.clientId);
-    });
-  });
+  if (request.method === 'GET' && url.pathname === '/api/rooms') {
+    sendJson(response, 200, { rooms: rooms.listRooms() });
+    return;
+  }
 
-  socket.on('room:draw-cancel', (payload = {}) => {
-    emitAction(socket, 'room:draw-cancel', () => {
-      return rooms.cancelDraw(payload.roomId, payload.clientId);
-    });
-  });
+  if (request.method === 'POST' && url.pathname === '/api/rooms') {
+    const room = rooms.createRoom();
+    sendJson(response, 201, { room: rooms.serialize(room) });
+    return;
+  }
 
-  socket.on('room:rematch', (payload = {}) => {
-    emitAction(socket, 'room:rematch', () => {
-      return rooms.requestRematch(payload.roomId, payload.clientId);
-    });
-  });
+  const roomId = parts[2];
+  if (parts[0] === 'api' && parts[1] === 'rooms' && roomId) {
+    const room = rooms.getRoom(roomId);
 
-  socket.on('room:chat', (payload = {}) => {
-    emitAction(socket, 'room:chat', () => {
-      return rooms.addChat(payload.roomId, payload.clientId, payload.text);
-    });
-  });
+    if (request.method === 'GET' && parts.length === 3) {
+      if (!room) {
+        sendError(response, 404, 'Room not found');
+        return;
+      }
 
-  socket.on('disconnect', () => {
-    for (const room of rooms.disconnect(socket.id)) {
-      void broadcastRoom(room);
+      rooms.updateClock(room);
+      sendJson(response, 200, { room: rooms.serialize(room) });
+      return;
     }
-  });
+
+    if (request.method === 'GET' && parts[3] === 'events') {
+      if (!room) {
+        sendError(response, 404, 'Room not found');
+        return;
+      }
+
+      const clientId = String(url.searchParams.get('clientId') || '');
+      response.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      response.write('\n');
+
+      const client = { clientId, response };
+      streamSet(roomId).add(client);
+      sendEvent(client, rooms.serialize(room, clientId));
+
+      request.on('close', () => {
+        streamSet(roomId).delete(client);
+        for (const changedRoom of rooms.disconnect(clientId)) {
+          broadcastRoom(changedRoom);
+        }
+      });
+      return;
+    }
+
+    if (request.method === 'POST' && parts[3]) {
+      await handleRoomAction(request, response, roomId, parts[3]);
+      return;
+    }
+  }
+
+  sendError(response, 404, 'Not found');
 });
 
 setInterval(() => {
   for (const room of rooms.tickClocks()) {
-    void broadcastRoom(room);
+    broadcastRoom(room);
   }
 }, 1000).unref();
 
