@@ -4,10 +4,15 @@ A production-minded realtime chess project built with React, native HTTP, Server
 
 ## Features
 
+- Chess-platform web shell with Home, Play, Puzzles, Learn, Analysis, Watch, and Community sections
 - Create or join shareable game rooms
 - White/black seat assignment with spectator mode when seats are full
 - Legal move validation through `chess.js`
 - Click-to-move board with legal move hints and promotion picker
+- Built-in bot game with selectable playing style
+- Puzzle trainer with hints and solutions
+- FEN analysis board with legal move exploration
+- Lesson cards, tournament/event cards, community hub, and leaderboard UI
 - Server-side chess clocks with increment and flag detection
 - Draw offers, resignations, and rematch flow
 - Separate player identity per browser tab

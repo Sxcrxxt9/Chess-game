@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Chess } from 'chess.js';
 
 const apiBase = window.location.origin;
 
@@ -26,18 +27,89 @@ const promotionPieces = [
 ];
 
 const iconGlyphs = {
+  analysis: 'A',
+  bot: 'CPU',
+  book: 'B',
+  bolt: '!',
+  chart: '↑',
   clipboard: '[]',
   flag: '|>',
   handshake: '<>',
   history: '@',
+  home: 'H',
   message: '#',
+  play: '▶',
   plus: '+',
+  puzzle: '?',
   rotate: '↻',
   send: '>',
   share: '<',
+  shield: '◆',
   swords: 'X',
-  users: 'oo'
+  trophy: 'T',
+  users: 'oo',
+  watch: '◉'
 };
+
+const navItems = [
+  { id: 'home', label: 'Home', icon: 'home' },
+  { id: 'play', label: 'Play', icon: 'play' },
+  { id: 'puzzles', label: 'Puzzles', icon: 'puzzle' },
+  { id: 'learn', label: 'Learn', icon: 'book' },
+  { id: 'analysis', label: 'Analysis', icon: 'analysis' },
+  { id: 'watch', label: 'Watch', icon: 'watch' },
+  { id: 'community', label: 'Community', icon: 'users' }
+];
+
+const timeControls = [
+  { id: 'bullet', label: '1 min', meta: 'Bullet' },
+  { id: 'blitz', label: '3|2', meta: 'Blitz' },
+  { id: 'rapid', label: '10|5', meta: 'Rapid' },
+  { id: 'daily', label: 'Daily', meta: 'Correspondence' }
+];
+
+const puzzles = [
+  {
+    title: 'Back rank tactic',
+    theme: 'Mate in 1',
+    fen: '6k1/5ppp/8/8/8/8/5PPP/6RK w - - 0 1',
+    solution: ['Re8#'],
+    hint: 'Use the open file and the trapped king.'
+  },
+  {
+    title: 'Fork the queen',
+    theme: 'Knight fork',
+    fen: 'r3k2r/ppp2ppp/2n5/3q4/3P4/2N2N2/PPP2PPP/R2QKB1R w KQkq - 0 1',
+    solution: ['Nxd5'],
+    hint: 'A central knight captures with tempo.'
+  },
+  {
+    title: 'Win the rook',
+    theme: 'Skewer',
+    fen: '4r1k1/5ppp/8/8/8/5Q2/5PPP/6K1 w - - 0 1',
+    solution: ['Qd5'],
+    hint: 'Check first, then collect the heavy piece.'
+  }
+];
+
+const lessons = [
+  { title: 'Opening principles', progress: 86, text: 'Control the center, develop minor pieces, castle before launching attacks.' },
+  { title: 'Tactical vision', progress: 58, text: 'Train pins, forks, skewers, discovered attacks, and forcing move checks.' },
+  { title: 'Endgame basics', progress: 42, text: 'Convert king and pawn endings with opposition, outside passers, and activity.' }
+];
+
+const events = [
+  { title: 'Rapid Arena', status: 'Live', players: 128, time: '10|5' },
+  { title: 'Weekend Swiss', status: 'Registering', players: 64, time: '15|10' },
+  { title: 'Puzzle Storm', status: 'Open', players: 420, time: '3 min' }
+];
+
+const leaderboard = [
+  { name: 'NakamuraFan', rating: 2681, streak: '+18' },
+  { name: 'BangkokBishop', rating: 2440, streak: '+11' },
+  { name: 'EndgameLab', rating: 2312, streak: '+7' },
+  { name: 'KnightShift', rating: 2204, streak: '+5' }
+];
 
 function Icon({ name }) {
   return (
@@ -96,10 +168,34 @@ function isPromotionMove(piece, toSquare) {
   return (piece.color === 'w' && toSquare.endsWith('8')) || (piece.color === 'b' && toSquare.endsWith('1'));
 }
 
+function legalMovesBySquare(game) {
+  const moves = {};
+  for (const move of game.moves({ verbose: true })) {
+    moves[move.from] ||= [];
+    moves[move.from].push({
+      from: move.from,
+      to: move.to,
+      san: move.san,
+      flags: move.flags,
+      promotion: move.promotion || null
+    });
+  }
+  return moves;
+}
+
+function roomFromGame(game, lastMove = null) {
+  return {
+    board: game.board(),
+    legalMoves: legalMovesBySquare(game),
+    lastMove
+  };
+}
+
 function App() {
   const identity = useMemo(getStoredIdentity, []);
   const [clientId] = useState(identity.clientId);
   const [name, setName] = useState(identity.name);
+  const [activeSection, setActiveSection] = useState(getInitialRoomId() ? 'play' : 'home');
   const [roomId, setRoomId] = useState(getInitialRoomId);
   const [room, setRoom] = useState(null);
   const [roomReceivedAt, setRoomReceivedAt] = useState(Date.now());
@@ -180,6 +276,15 @@ function App() {
     }
   }
 
+  function leaveRoom() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('room');
+    window.history.replaceState({}, '', url);
+    setRoomId('');
+    setRoom(null);
+    setConnected(false);
+  }
+
   function enterRoom(nextRoomId) {
     const trimmed = normalizeRoomInput(nextRoomId);
     if (!trimmed) return;
@@ -187,6 +292,7 @@ function App() {
     const url = new URL(window.location.href);
     url.searchParams.set('room', trimmed);
     window.history.replaceState({}, '', url);
+    setActiveSection('play');
     setRoomId(trimmed);
     setRoom(null);
   }
@@ -255,92 +361,557 @@ function App() {
     setChatInput('');
   }
 
+  function navigate(sectionId) {
+    setActiveSection(sectionId);
+    if (sectionId !== 'play' && roomId) leaveRoom();
+  }
+
   return (
-    <main className="app-shell">
-      <section className="topbar" aria-label="Game navigation">
-        <div className="brand">
+    <div className="platform-shell">
+      <aside className="app-sidebar" aria-label="Main navigation">
+        <div className="brand sidebar-brand">
           <Icon name="swords" />
           <div>
-            <strong>Online Chess Arena</strong>
-            <span>Realtime rooms with server-side rules</span>
+            <strong>Chess Arena</strong>
+            <span>Play · Train · Watch</span>
           </div>
         </div>
-        <div className="profile">
-          <input
-            aria-label="Player name"
-            maxLength={24}
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Your name"
-          />
-          <span className={`connection ${connected ? 'online' : ''}`}>
-            {connected ? 'online' : 'connecting'}
-          </span>
+        <nav className="main-nav">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              className={activeSection === item.id ? 'active' : ''}
+              onClick={() => navigate(item.id)}
+            >
+              <Icon name={item.icon} />
+              {item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-status">
+          <span className={connected ? 'status-dot live' : 'status-dot'} />
+          <span>{room ? (connected ? 'Live room' : 'Connecting') : 'Ready'}</span>
         </div>
-      </section>
+      </aside>
 
-      {!room ? (
-        <Lobby
+      <main className="app-shell">
+        <section className="topbar" aria-label="Game navigation">
+          <div>
+            <span className="eyebrow">{activeSection}</span>
+            <h1 className="page-title">{room ? `Room ${room.id}` : sectionTitle(activeSection)}</h1>
+          </div>
+          <div className="profile">
+            <input
+              aria-label="Player name"
+              maxLength={24}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Your name"
+            />
+            <span className={`connection ${connected ? 'online' : ''}`}>
+              {room ? (connected ? 'online' : 'connecting') : 'offline-ready'}
+            </span>
+          </div>
+        </section>
+
+        {room ? (
+          <GameRoom
+            room={room}
+            viewerColor={viewerColor}
+            viewerRole={viewerRole}
+            roomReceivedAt={roomReceivedAt}
+            now={now}
+            selected={selected}
+            flipped={flipped}
+            setFlipped={setFlipped}
+            handleSquare={handleSquare}
+            inviteUrl={inviteUrl}
+            copyInvite={copyInvite}
+            emit={emit}
+            canAct={canAct}
+            notice={notice}
+            chatInput={chatInput}
+            setChatInput={setChatInput}
+            sendChat={sendChat}
+            leaveRoom={leaveRoom}
+          />
+        ) : (
+          <SectionRenderer
+            section={activeSection}
+            setActiveSection={setActiveSection}
+            joinInput={joinInput}
+            setJoinInput={setJoinInput}
+            createRoom={createRoom}
+            enterRoom={enterRoom}
+            notice={notice}
+          />
+        )}
+
+        {pendingPromotion && <PromotionDialog choosePromotion={choosePromotion} />}
+      </main>
+    </div>
+  );
+}
+
+function sectionTitle(section) {
+  const titles = {
+    home: 'Command center',
+    play: 'Play chess',
+    puzzles: 'Puzzle trainer',
+    learn: 'Training academy',
+    analysis: 'Analysis board',
+    watch: 'Live events',
+    community: 'Community hub'
+  };
+  return titles[section] || 'Chess Arena';
+}
+
+function SectionRenderer(props) {
+  if (props.section === 'play') return <PlayCenter {...props} />;
+  if (props.section === 'puzzles') return <PuzzleTrainer />;
+  if (props.section === 'learn') return <LearnCenter />;
+  if (props.section === 'analysis') return <AnalysisLab />;
+  if (props.section === 'watch') return <WatchCenter />;
+  if (props.section === 'community') return <CommunityCenter />;
+  return <HomeDashboard setActiveSection={props.setActiveSection} createRoom={props.createRoom} />;
+}
+
+function HomeDashboard({ setActiveSection, createRoom }) {
+  return (
+    <section className="dashboard-grid">
+      <div className="hero-board">
+        <MiniBoard />
+        <div className="hero-actions">
+          <span className="eyebrow">Today</span>
+          <h2>One place to play, solve, study, analyze, and follow chess.</h2>
+          <div className="hero-buttons">
+            <button className="primary-action" onClick={createRoom}>
+              <Icon name="bolt" />
+              New online game
+            </button>
+            <button onClick={() => setActiveSection('puzzles')}>
+              <Icon name="puzzle" />
+              Solve puzzles
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <StatsStrip />
+
+      <div className="tile-grid">
+        <FeatureTile icon="play" title="Play" text="Online rooms, bot games, time controls, resign, draw offers, and rematches." onClick={() => setActiveSection('play')} />
+        <FeatureTile icon="puzzle" title="Puzzles" text="Tactics trainer with hints, solutions, and theme cards." onClick={() => setActiveSection('puzzles')} />
+        <FeatureTile icon="analysis" title="Analysis" text="Load FEN, explore legal moves, and inspect move history." onClick={() => setActiveSection('analysis')} />
+        <FeatureTile icon="watch" title="Watch" text="Event cards, tournament schedule, and featured games." onClick={() => setActiveSection('watch')} />
+      </div>
+    </section>
+  );
+}
+
+function StatsStrip() {
+  const stats = [
+    ['Rapid', '1248'],
+    ['Puzzle', '1810'],
+    ['Games', '37'],
+    ['Accuracy', '82%']
+  ];
+  return (
+    <div className="stats-strip">
+      {stats.map(([label, value]) => (
+        <div key={label}>
+          <span className="label">{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FeatureTile({ icon, title, text, onClick }) {
+  return (
+    <button className="feature-tile" onClick={onClick}>
+      <Icon name={icon} />
+      <strong>{title}</strong>
+      <span>{text}</span>
+    </button>
+  );
+}
+
+function PlayCenter({ joinInput, setJoinInput, createRoom, enterRoom, notice }) {
+  return (
+    <section className="play-layout">
+      <div className="mode-panel">
+        <OnlineLobby
           joinInput={joinInput}
           setJoinInput={setJoinInput}
           createRoom={createRoom}
           enterRoom={enterRoom}
           notice={notice}
         />
-      ) : (
-        <GameRoom
-          room={room}
-          viewerColor={viewerColor}
-          viewerRole={viewerRole}
-          roomReceivedAt={roomReceivedAt}
-          now={now}
-          selected={selected}
-          flipped={flipped}
-          setFlipped={setFlipped}
-          handleSquare={handleSquare}
-          inviteUrl={inviteUrl}
-          copyInvite={copyInvite}
-          emit={emit}
-          canAct={canAct}
-          notice={notice}
-          chatInput={chatInput}
-          setChatInput={setChatInput}
-          sendChat={sendChat}
-        />
-      )}
-
-      {pendingPromotion && <PromotionDialog choosePromotion={choosePromotion} />}
-    </main>
+        <div className="time-grid">
+          {timeControls.map((control) => (
+            <button key={control.id} onClick={createRoom}>
+              <strong>{control.label}</strong>
+              <span>{control.meta}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <BotArena />
+    </section>
   );
 }
 
-function Lobby({ joinInput, setJoinInput, createRoom, enterRoom, notice }) {
+function OnlineLobby({ joinInput, setJoinInput, createRoom, enterRoom, notice }) {
   return (
-    <section className="lobby">
-      <div className="lobby-panel">
-        <div className="lobby-copy">
-          <span className="eyebrow">Play online</span>
-          <h1>Chess that is ready for real matches.</h1>
-          <p>Create a room, send the link, and play with clocks, chat, spectators, draw offers, and rematches.</p>
+    <section className="join-box play-card">
+      <div>
+        <span className="eyebrow">Online</span>
+        <h2>Challenge a friend</h2>
+        <p>Create a room, share the link, or paste an invite URL.</p>
+      </div>
+      <button className="primary-action" onClick={createRoom}>
+        <Icon name="plus" />
+        Create room
+      </button>
+      <div className="join-row">
+        <input
+          value={joinInput}
+          onChange={(event) => setJoinInput(event.target.value)}
+          placeholder="Room code or invite link"
+          aria-label="Room code"
+        />
+        <button onClick={() => enterRoom(joinInput)}>Join</button>
+      </div>
+      {notice && <p className="notice">{notice}</p>}
+    </section>
+  );
+}
+
+function BotArena() {
+  const [fen, setFen] = useState(new Chess().fen());
+  const [selected, setSelected] = useState(null);
+  const [lastMove, setLastMove] = useState(null);
+  const [botLevel, setBotLevel] = useState('balanced');
+  const game = useMemo(() => new Chess(fen), [fen]);
+  const playerTurn = game.turn() === 'w' && !game.isGameOver();
+
+  function makeBotMove(nextGame) {
+    if (nextGame.isGameOver()) return;
+    const legal = nextGame.moves({ verbose: true });
+    const captures = legal.filter((move) => move.captured);
+    const checks = legal.filter((move) => move.san.includes('+') || move.san.includes('#'));
+    const pool = botLevel === 'sharp' && (checks.length || captures.length) ? [...checks, ...captures] : legal;
+    const move = pool[Math.floor(Math.random() * pool.length)];
+    const played = nextGame.move({ from: move.from, to: move.to, promotion: move.promotion || 'q' });
+    setLastMove({ from: played.from, to: played.to });
+    setFen(nextGame.fen());
+  }
+
+  function handleBotSquare(square) {
+    if (!playerTurn) return;
+    const piece = pieceAt(game.board(), square);
+    const selectedPiece = pieceAt(game.board(), selected);
+
+    if (piece?.color === 'w' && (!selected || selected === square)) {
+      setSelected(square);
+      return;
+    }
+
+    if (!selected) return;
+    const move = (legalMovesBySquare(game)[selected] || []).find((candidate) => candidate.to === square);
+    if (!move) {
+      setSelected(piece?.color === 'w' ? square : null);
+      return;
+    }
+
+    const nextGame = new Chess(fen);
+    const promotion = isPromotionMove(selectedPiece, square) ? 'q' : undefined;
+    const played = nextGame.move({ from: selected, to: square, promotion });
+    setSelected(null);
+    setLastMove({ from: played.from, to: played.to });
+    setFen(nextGame.fen());
+    window.setTimeout(() => makeBotMove(nextGame), 450);
+  }
+
+  function reset() {
+    setFen(new Chess().fen());
+    setSelected(null);
+    setLastMove(null);
+  }
+
+  return (
+    <section className="bot-arena">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">Computer</span>
+          <h2>Play the bot</h2>
         </div>
-        <div className="join-box">
-          <button className="primary-action" onClick={createRoom}>
-            <Icon name="plus" />
-            Create room
-          </button>
-          <div className="join-row">
-            <input
-              value={joinInput}
-              onChange={(event) => setJoinInput(event.target.value)}
-              placeholder="Room code"
-              aria-label="Room code"
-            />
-            <button onClick={() => enterRoom(joinInput)}>Join</button>
-          </div>
-          {notice && <p className="notice">{notice}</p>}
-        </div>
+        <select value={botLevel} onChange={(event) => setBotLevel(event.target.value)}>
+          <option value="balanced">Balanced</option>
+          <option value="sharp">Sharp</option>
+        </select>
+      </div>
+      <ChessBoard room={roomFromGame(game, lastMove)} selected={selected} flipped={false} handleSquare={handleBotSquare} compact />
+      <div className="bot-footer">
+        <strong>{game.isGameOver() ? 'Game over' : playerTurn ? 'Your move' : 'Bot thinking'}</strong>
+        <button onClick={reset}>
+          <Icon name="rotate" />
+          New bot game
+        </button>
       </div>
     </section>
+  );
+}
+
+function PuzzleTrainer() {
+  const [index, setIndex] = useState(0);
+  const [fen, setFen] = useState(puzzles[0].fen);
+  const [selected, setSelected] = useState(null);
+  const [status, setStatus] = useState('Find the best move.');
+  const [lastMove, setLastMove] = useState(null);
+  const puzzle = puzzles[index];
+  const game = useMemo(() => new Chess(fen), [fen]);
+
+  function loadPuzzle(nextIndex) {
+    const next = (nextIndex + puzzles.length) % puzzles.length;
+    setIndex(next);
+    setFen(puzzles[next].fen);
+    setSelected(null);
+    setLastMove(null);
+    setStatus('Find the best move.');
+  }
+
+  function handlePuzzleSquare(square) {
+    const piece = pieceAt(game.board(), square);
+    if (piece?.color === game.turn() && (!selected || selected === square)) {
+      setSelected(square);
+      return;
+    }
+    if (!selected) return;
+
+    const move = (legalMovesBySquare(game)[selected] || []).find((candidate) => candidate.to === square);
+    if (!move) {
+      setSelected(piece ? square : null);
+      return;
+    }
+
+    const nextGame = new Chess(fen);
+    const played = nextGame.move({ from: selected, to: square, promotion: move.promotion || 'q' });
+    setLastMove({ from: played.from, to: played.to });
+    setSelected(null);
+
+    if (played.san === puzzle.solution[0]) {
+      setStatus(`Correct: ${played.san}`);
+      setFen(nextGame.fen());
+    } else {
+      setStatus(`Try again. Hint: ${puzzle.hint}`);
+    }
+  }
+
+  return (
+    <section className="training-layout">
+      <div className="trainer-board">
+        <ChessBoard room={roomFromGame(game, lastMove)} selected={selected} flipped={false} handleSquare={handlePuzzleSquare} compact />
+      </div>
+      <aside className="training-panel">
+        <span className="eyebrow">{puzzle.theme}</span>
+        <h2>{puzzle.title}</h2>
+        <p>{status}</p>
+        <div className="solution-box">
+          <span className="label">Solution</span>
+          <strong>{puzzle.solution.join(' ')}</strong>
+        </div>
+        <button onClick={() => setStatus(`Hint: ${puzzle.hint}`)}>Hint</button>
+        <button className="primary-action" onClick={() => loadPuzzle(index + 1)}>Next puzzle</button>
+      </aside>
+    </section>
+  );
+}
+
+function LearnCenter() {
+  return (
+    <section className="content-grid">
+      {lessons.map((lesson) => (
+        <article className="learning-card" key={lesson.title}>
+          <span className="eyebrow">Lesson</span>
+          <h2>{lesson.title}</h2>
+          <p>{lesson.text}</p>
+          <div className="progress-track">
+            <span style={{ width: `${lesson.progress}%` }} />
+          </div>
+          <strong>{lesson.progress}% complete</strong>
+        </article>
+      ))}
+      <article className="learning-card wide-card">
+        <span className="eyebrow">Drills</span>
+        <h2>Training plan</h2>
+        <div className="drill-list">
+          <span>10 tactics</span>
+          <span>1 rapid game</span>
+          <span>Review 3 mistakes</span>
+          <span>Endgame repetition</span>
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function AnalysisLab() {
+  const [fenInput, setFenInput] = useState(new Chess().fen());
+  const [fen, setFen] = useState(fenInput);
+  const [selected, setSelected] = useState(null);
+  const [lastMove, setLastMove] = useState(null);
+  const [error, setError] = useState('');
+  const game = useMemo(() => {
+    try {
+      return new Chess(fen);
+    } catch {
+      return new Chess();
+    }
+  }, [fen]);
+
+  function loadFen() {
+    try {
+      const next = new Chess(fenInput);
+      setFen(next.fen());
+      setError('');
+      setSelected(null);
+      setLastMove(null);
+    } catch {
+      setError('Invalid FEN');
+    }
+  }
+
+  function handleAnalysisSquare(square) {
+    const piece = pieceAt(game.board(), square);
+    if (piece?.color === game.turn() && (!selected || selected === square)) {
+      setSelected(square);
+      return;
+    }
+    if (!selected) return;
+
+    const move = (legalMovesBySquare(game)[selected] || []).find((candidate) => candidate.to === square);
+    if (!move) {
+      setSelected(piece ? square : null);
+      return;
+    }
+
+    const nextGame = new Chess(fen);
+    const played = nextGame.move({ from: selected, to: square, promotion: move.promotion || 'q' });
+    setFen(nextGame.fen());
+    setFenInput(nextGame.fen());
+    setLastMove({ from: played.from, to: played.to });
+    setSelected(null);
+  }
+
+  return (
+    <section className="analysis-layout">
+      <div>
+        <ChessBoard room={roomFromGame(game, lastMove)} selected={selected} flipped={false} handleSquare={handleAnalysisSquare} compact />
+      </div>
+      <aside className="analysis-panel">
+        <span className="eyebrow">Engine room</span>
+        <h2>Analysis board</h2>
+        <textarea value={fenInput} onChange={(event) => setFenInput(event.target.value)} aria-label="FEN input" />
+        <div className="room-actions">
+          <button onClick={loadFen}>Load FEN</button>
+          <button onClick={() => {
+            const start = new Chess().fen();
+            setFen(start);
+            setFenInput(start);
+            setLastMove(null);
+            setSelected(null);
+            setError('');
+          }}>
+            Reset
+          </button>
+        </div>
+        {error && <p className="notice">{error}</p>}
+        <div className="analysis-readout">
+          <span>Turn</span>
+          <strong>{game.turn() === 'w' ? 'White' : 'Black'}</strong>
+          <span>Legal moves</span>
+          <strong>{game.moves().length}</strong>
+          <span>Status</span>
+          <strong>{game.isGameOver() ? 'Game over' : game.inCheck() ? 'Check' : 'Playable'}</strong>
+        </div>
+      </aside>
+    </section>
+  );
+}
+
+function WatchCenter() {
+  return (
+    <section className="content-grid">
+      {events.map((event) => (
+        <article className="event-card" key={event.title}>
+          <span className={`event-status ${event.status.toLowerCase()}`}>{event.status}</span>
+          <h2>{event.title}</h2>
+          <div className="event-meta">
+            <span>{event.players} players</span>
+            <span>{event.time}</span>
+          </div>
+          <MiniBoard small />
+          <button>Open event</button>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function CommunityCenter() {
+  return (
+    <section className="community-layout">
+      <article className="leaderboard-card">
+        <span className="eyebrow">Leaderboard</span>
+        <h2>Top club players</h2>
+        {leaderboard.map((player, index) => (
+          <div className="rank-row" key={player.name}>
+            <span>{index + 1}</span>
+            <strong>{player.name}</strong>
+            <em>{player.rating}</em>
+            <small>{player.streak}</small>
+          </div>
+        ))}
+      </article>
+      <article className="community-card">
+        <span className="eyebrow">Club</span>
+        <h2>Daily agenda</h2>
+        <p>Post-game reviews, challenge rooms, weekly swiss events, and puzzle ladders live here.</p>
+        <div className="drill-list">
+          <span>Club chat</span>
+          <span>Member challenges</span>
+          <span>Study groups</span>
+          <span>Announcements</span>
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function MiniBoard({ small = false }) {
+  const pattern = [
+    'rnbqkbnr',
+    'pppppppp',
+    '........',
+    '....P...',
+    '........',
+    '.....N..',
+    'PPPP.PPP',
+    'RNBQKB.R'
+  ];
+  return (
+    <div className={small ? 'mini-board small' : 'mini-board'}>
+      {pattern.flatMap((rank, row) =>
+        rank.split('').map((piece, col) => (
+          <span className={(row + col) % 2 ? 'dark' : 'light'} key={`${row}-${col}`}>
+            {piece !== '.' ? piece : ''}
+          </span>
+        ))
+      )}
+    </div>
   );
 }
 
@@ -361,7 +932,8 @@ function GameRoom({
   notice,
   chatInput,
   setChatInput,
-  sendChat
+  sendChat,
+  leaveRoom
 }) {
   const boardFlipped = flipped || viewerColor === 'b';
   const activeLabel = room.clock.activeColor;
@@ -383,6 +955,7 @@ function GameRoom({
             </button>
           </div>
           <input aria-label="Invite link" value={inviteUrl} readOnly />
+          <button onClick={leaveRoom}>Back to hub</button>
         </div>
 
         <PlayerCard
@@ -470,7 +1043,7 @@ function StatusStrip({ room, viewerColor }) {
   );
 }
 
-function ChessBoard({ room, selected, flipped, handleSquare }) {
+function ChessBoard({ room, selected, flipped, handleSquare, compact = false }) {
   const legalTargets = new Set((room.legalMoves[selected] || []).map((move) => move.to));
   const lastMove = room.lastMove ? new Set([room.lastMove.from, room.lastMove.to]) : new Set();
   const cells = [];
@@ -501,7 +1074,7 @@ function ChessBoard({ room, selected, flipped, handleSquare }) {
     }
   }
 
-  return <div className="board">{cells}</div>;
+  return <div className={compact ? 'board compact-board' : 'board'}>{cells}</div>;
 }
 
 function ActionBar({ room, canAct, emit }) {
