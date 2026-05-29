@@ -111,6 +111,26 @@ const leaderboard = [
   { name: 'KnightShift', rating: 2204, streak: '+5' }
 ];
 
+const defaultPlatform = {
+  profile: {
+    rapid: 1248,
+    puzzle: 1810,
+    games: 0,
+    wins: 0,
+    botGames: 0,
+    puzzlesSolved: 0,
+    lessonsCompleted: 0,
+    eventsJoined: 0,
+    accuracy: 82,
+    streak: 0
+  },
+  puzzles,
+  lessons,
+  events,
+  leaderboard,
+  timeControls
+};
+
 function Icon({ name }) {
   return (
     <span className="ui-icon" aria-hidden="true">
@@ -120,8 +140,11 @@ function Icon({ name }) {
 }
 
 function getStoredIdentity() {
+  const storedClientId = window.sessionStorage.getItem('chess-client-id');
+  const clientId = storedClientId || crypto.randomUUID();
+  window.sessionStorage.setItem('chess-client-id', clientId);
   return {
-    clientId: crypto.randomUUID(),
+    clientId,
     name: window.localStorage.getItem('chess-player-name') || ''
   };
 }
@@ -207,11 +230,16 @@ function App() {
   const [flipped, setFlipped] = useState(false);
   const [connected, setConnected] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [platform, setPlatform] = useState(defaultPlatform);
   const eventsRef = useRef(null);
 
   useEffect(() => {
     window.localStorage.setItem('chess-player-name', name);
   }, [name]);
+
+  useEffect(() => {
+    refreshPlatform();
+  }, [clientId, name]);
 
   useEffect(() => {
     if (!roomId) return undefined;
@@ -265,9 +293,36 @@ function App() {
   const canAct = Boolean(viewerColor && room && hasBothPlayers && !room.result);
   const inviteUrl = room ? `${window.location.origin}${window.location.pathname}?room=${room.id}` : '';
 
-  async function createRoom() {
+  async function refreshPlatform() {
     try {
-      const response = await fetch(`${apiBase}/api/rooms`, { method: 'POST' });
+      const response = await fetch(`${apiBase}/api/platform?clientId=${encodeURIComponent(clientId)}&name=${encodeURIComponent(name)}`);
+      if (!response.ok) throw new Error('Platform unavailable');
+      setPlatform(await response.json());
+    } catch {
+      setNotice('Online platform data is reconnecting');
+    }
+  }
+
+  async function postPlatformAction(path, payload = {}) {
+    const response = await fetch(`${apiBase}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, name, ...payload })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Request failed');
+    if (data.profile || data.leaderboard || data.events) setPlatform(data);
+    return data;
+  }
+
+  async function createRoom(timeControl = 'rapid') {
+    const selectedTimeControl = typeof timeControl === 'string' ? timeControl : 'rapid';
+    try {
+      const response = await fetch(`${apiBase}/api/rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeControl: selectedTimeControl })
+      });
       if (!response.ok) throw new Error('Unable to create room');
       const payload = await response.json();
       enterRoom(payload.room.id);
@@ -439,6 +494,10 @@ function App() {
           <SectionRenderer
             section={activeSection}
             setActiveSection={setActiveSection}
+            platform={platform}
+            clientId={clientId}
+            name={name}
+            postPlatformAction={postPlatformAction}
             joinInput={joinInput}
             setJoinInput={setJoinInput}
             createRoom={createRoom}
@@ -468,15 +527,15 @@ function sectionTitle(section) {
 
 function SectionRenderer(props) {
   if (props.section === 'play') return <PlayCenter {...props} />;
-  if (props.section === 'puzzles') return <PuzzleTrainer />;
-  if (props.section === 'learn') return <LearnCenter />;
-  if (props.section === 'analysis') return <AnalysisLab />;
-  if (props.section === 'watch') return <WatchCenter />;
-  if (props.section === 'community') return <CommunityCenter />;
-  return <HomeDashboard setActiveSection={props.setActiveSection} createRoom={props.createRoom} />;
+  if (props.section === 'puzzles') return <PuzzleTrainer platform={props.platform} postPlatformAction={props.postPlatformAction} />;
+  if (props.section === 'learn') return <LearnCenter platform={props.platform} postPlatformAction={props.postPlatformAction} />;
+  if (props.section === 'analysis') return <AnalysisLab postPlatformAction={props.postPlatformAction} />;
+  if (props.section === 'watch') return <WatchCenter platform={props.platform} postPlatformAction={props.postPlatformAction} enterRoom={props.enterRoom} />;
+  if (props.section === 'community') return <CommunityCenter platform={props.platform} createRoom={props.createRoom} />;
+  return <HomeDashboard setActiveSection={props.setActiveSection} createRoom={props.createRoom} platform={props.platform} />;
 }
 
-function HomeDashboard({ setActiveSection, createRoom }) {
+function HomeDashboard({ setActiveSection, createRoom, platform }) {
   return (
     <section className="dashboard-grid">
       <div className="hero-board">
@@ -497,7 +556,7 @@ function HomeDashboard({ setActiveSection, createRoom }) {
         </div>
       </div>
 
-      <StatsStrip />
+      <StatsStrip profile={platform.profile} />
 
       <div className="tile-grid">
         <FeatureTile icon="play" title="Play" text="Online rooms, bot games, time controls, resign, draw offers, and rematches." onClick={() => setActiveSection('play')} />
@@ -509,12 +568,12 @@ function HomeDashboard({ setActiveSection, createRoom }) {
   );
 }
 
-function StatsStrip() {
+function StatsStrip({ profile }) {
   const stats = [
-    ['Rapid', '1248'],
-    ['Puzzle', '1810'],
-    ['Games', '37'],
-    ['Accuracy', '82%']
+    ['Rapid', profile.rapid],
+    ['Puzzle', profile.puzzle],
+    ['Games', profile.games],
+    ['Accuracy', `${profile.accuracy}%`]
   ];
   return (
     <div className="stats-strip">
@@ -538,7 +597,7 @@ function FeatureTile({ icon, title, text, onClick }) {
   );
 }
 
-function PlayCenter({ joinInput, setJoinInput, createRoom, enterRoom, notice }) {
+function PlayCenter({ joinInput, setJoinInput, createRoom, enterRoom, notice, platform, postPlatformAction }) {
   return (
     <section className="play-layout">
       <div className="mode-panel">
@@ -550,15 +609,15 @@ function PlayCenter({ joinInput, setJoinInput, createRoom, enterRoom, notice }) 
           notice={notice}
         />
         <div className="time-grid">
-          {timeControls.map((control) => (
-            <button key={control.id} onClick={createRoom}>
+          {platform.timeControls.map((control) => (
+            <button key={control.id} onClick={() => createRoom(control.id)}>
               <strong>{control.label}</strong>
               <span>{control.meta}</span>
             </button>
           ))}
         </div>
       </div>
-      <BotArena />
+      <BotArena postPlatformAction={postPlatformAction} />
     </section>
   );
 }
@@ -589,13 +648,21 @@ function OnlineLobby({ joinInput, setJoinInput, createRoom, enterRoom, notice })
   );
 }
 
-function BotArena() {
+function BotArena({ postPlatformAction }) {
   const [fen, setFen] = useState(new Chess().fen());
   const [selected, setSelected] = useState(null);
   const [lastMove, setLastMove] = useState(null);
   const [botLevel, setBotLevel] = useState('balanced');
+  const reportedFenRef = useRef('');
   const game = useMemo(() => new Chess(fen), [fen]);
   const playerTurn = game.turn() === 'w' && !game.isGameOver();
+
+  useEffect(() => {
+    if (!game.isGameOver() || reportedFenRef.current === fen) return;
+    reportedFenRef.current = fen;
+    const result = game.isCheckmate() ? (game.turn() === 'b' ? 'win' : 'loss') : 'draw';
+    postPlatformAction('/api/platform/bot-result', { result }).catch(() => {});
+  }, [fen, game, postPlatformAction]);
 
   function makeBotMove(nextGame) {
     if (nextGame.isGameOver()) return;
@@ -639,6 +706,7 @@ function BotArena() {
     setFen(new Chess().fen());
     setSelected(null);
     setLastMove(null);
+    reportedFenRef.current = '';
   }
 
   return (
@@ -665,19 +733,20 @@ function BotArena() {
   );
 }
 
-function PuzzleTrainer() {
+function PuzzleTrainer({ platform, postPlatformAction }) {
   const [index, setIndex] = useState(0);
-  const [fen, setFen] = useState(puzzles[0].fen);
+  const puzzleSet = platform.puzzles.length ? platform.puzzles : puzzles;
+  const [fen, setFen] = useState(puzzleSet[0].fen);
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState('Find the best move.');
   const [lastMove, setLastMove] = useState(null);
-  const puzzle = puzzles[index];
+  const puzzle = puzzleSet[index] || puzzleSet[0];
   const game = useMemo(() => new Chess(fen), [fen]);
 
   function loadPuzzle(nextIndex) {
-    const next = (nextIndex + puzzles.length) % puzzles.length;
+    const next = (nextIndex + puzzleSet.length) % puzzleSet.length;
     setIndex(next);
-    setFen(puzzles[next].fen);
+    setFen(puzzleSet[next].fen);
     setSelected(null);
     setLastMove(null);
     setStatus('Find the best move.');
@@ -705,8 +774,10 @@ function PuzzleTrainer() {
     if (played.san === puzzle.solution[0]) {
       setStatus(`Correct: ${played.san}`);
       setFen(nextGame.fen());
+      postPlatformAction('/api/platform/puzzle-result', { puzzleId: puzzle.id, solved: true }).catch(() => {});
     } else {
       setStatus(`Try again. Hint: ${puzzle.hint}`);
+      postPlatformAction('/api/platform/puzzle-result', { puzzleId: puzzle.id, solved: false }).catch(() => {});
     }
   }
 
@@ -730,10 +801,10 @@ function PuzzleTrainer() {
   );
 }
 
-function LearnCenter() {
+function LearnCenter({ platform, postPlatformAction }) {
   return (
     <section className="content-grid">
-      {lessons.map((lesson) => (
+      {platform.lessons.map((lesson) => (
         <article className="learning-card" key={lesson.title}>
           <span className="eyebrow">Lesson</span>
           <h2>{lesson.title}</h2>
@@ -742,6 +813,9 @@ function LearnCenter() {
             <span style={{ width: `${lesson.progress}%` }} />
           </div>
           <strong>{lesson.progress}% complete</strong>
+          <button onClick={() => postPlatformAction('/api/platform/lesson-complete', { lessonId: lesson.id }).catch(() => {})}>
+            Mark practiced
+          </button>
         </article>
       ))}
       <article className="learning-card wide-card">
@@ -758,12 +832,13 @@ function LearnCenter() {
   );
 }
 
-function AnalysisLab() {
+function AnalysisLab({ postPlatformAction }) {
   const [fenInput, setFenInput] = useState(new Chess().fen());
   const [fen, setFen] = useState(fenInput);
   const [selected, setSelected] = useState(null);
   const [lastMove, setLastMove] = useState(null);
   const [error, setError] = useState('');
+  const [savedAnalysis, setSavedAnalysis] = useState('');
   const game = useMemo(() => {
     try {
       return new Chess(fen);
@@ -806,6 +881,16 @@ function AnalysisLab() {
     setSelected(null);
   }
 
+  async function saveAnalysis() {
+    try {
+      const data = await postPlatformAction('/api/platform/analysis', { fen });
+      setSavedAnalysis(`${window.location.origin}/api/analysis/${data.analysis.id}`);
+      setError('');
+    } catch {
+      setError('Could not save analysis online');
+    }
+  }
+
   return (
     <section className="analysis-layout">
       <div>
@@ -817,6 +902,7 @@ function AnalysisLab() {
         <textarea value={fenInput} onChange={(event) => setFenInput(event.target.value)} aria-label="FEN input" />
         <div className="room-actions">
           <button onClick={loadFen}>Load FEN</button>
+          <button onClick={saveAnalysis}>Save online</button>
           <button onClick={() => {
             const start = new Chess().fen();
             setFen(start);
@@ -829,6 +915,7 @@ function AnalysisLab() {
           </button>
         </div>
         {error && <p className="notice">{error}</p>}
+        {savedAnalysis && <input aria-label="Saved analysis link" value={savedAnalysis} readOnly />}
         <div className="analysis-readout">
           <span>Turn</span>
           <strong>{game.turn() === 'w' ? 'White' : 'Black'}</strong>
@@ -842,10 +929,15 @@ function AnalysisLab() {
   );
 }
 
-function WatchCenter() {
+function WatchCenter({ platform, postPlatformAction, enterRoom }) {
+  async function register(eventId) {
+    const data = await postPlatformAction(`/api/events/${eventId}/register`);
+    if (data.room?.id) enterRoom(data.room.id);
+  }
+
   return (
     <section className="content-grid">
-      {events.map((event) => (
+      {platform.events.map((event) => (
         <article className="event-card" key={event.title}>
           <span className={`event-status ${event.status.toLowerCase()}`}>{event.status}</span>
           <h2>{event.title}</h2>
@@ -854,22 +946,22 @@ function WatchCenter() {
             <span>{event.time}</span>
           </div>
           <MiniBoard small />
-          <button>Open event</button>
+          <button onClick={() => register(event.id)}>Join event room</button>
         </article>
       ))}
     </section>
   );
 }
 
-function CommunityCenter() {
+function CommunityCenter({ platform, createRoom }) {
   return (
     <section className="community-layout">
       <article className="leaderboard-card">
         <span className="eyebrow">Leaderboard</span>
         <h2>Top club players</h2>
-        {leaderboard.map((player, index) => (
+        {platform.leaderboard.map((player, index) => (
           <div className="rank-row" key={player.name}>
-            <span>{index + 1}</span>
+            <span>{player.rank || index + 1}</span>
             <strong>{player.name}</strong>
             <em>{player.rating}</em>
             <small>{player.streak}</small>
@@ -886,6 +978,9 @@ function CommunityCenter() {
           <span>Study groups</span>
           <span>Announcements</span>
         </div>
+        <button className="primary-action" onClick={() => createRoom('rapid')}>
+          Create club challenge
+        </button>
       </article>
     </section>
   );

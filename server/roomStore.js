@@ -72,9 +72,11 @@ export class RoomStore {
     this.incrementMs = incrementMs;
   }
 
-  createRoom() {
+  createRoom(options = {}) {
     const id = nanoid(8);
     const now = Date.now();
+    const clockMs = Number.isFinite(options.clockMs) ? options.clockMs : this.clockMs;
+    const incrementMs = Number.isFinite(options.incrementMs) ? options.incrementMs : this.incrementMs;
     const room = {
       id,
       createdAt: now,
@@ -82,8 +84,10 @@ export class RoomStore {
       game: new Chess(),
       players: { w: null, b: null },
       spectators: new Map(),
-      clock: { w: this.clockMs, b: this.clockMs },
-      incrementMs: this.incrementMs,
+      clock: { w: clockMs, b: clockMs },
+      clockMs,
+      incrementMs,
+      mode: options.mode || 'rapid',
       activeSince: null,
       result: null,
       drawOfferBy: null,
@@ -305,7 +309,7 @@ export class RoomStore {
       room.players.w = room.players.b;
       room.players.b = previousWhite;
       room.game = new Chess();
-      room.clock = { w: this.clockMs, b: this.clockMs };
+      room.clock = { w: room.clockMs, b: room.clockMs };
       room.activeSince = room.players.w && room.players.b ? Date.now() : null;
       room.result = null;
       room.drawOfferBy = null;
@@ -422,6 +426,7 @@ export class RoomStore {
         white: room.clock.w,
         black: room.clock.b,
         incrementMs: room.incrementMs,
+        mode: room.mode,
         activeColor: room.result || !room.players.w || !room.players.b ? null : colorName[room.game.turn()]
       },
       result: room.result,

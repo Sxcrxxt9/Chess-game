@@ -11,6 +11,13 @@ const distDir = path.join(rootDir, 'dist');
 const port = Number(process.env.PORT || 3001);
 const rooms = new RoomStore();
 const streams = new Map();
+const timeControls = {
+  bullet: { mode: 'bullet', clockMs: 60_000, incrementMs: 0 },
+  blitz: { mode: 'blitz', clockMs: 3 * 60_000, incrementMs: 2_000 },
+  rapid: { mode: 'rapid', clockMs: 10 * 60_000, incrementMs: 5_000 },
+  daily: { mode: 'daily', clockMs: 24 * 60 * 60_000, incrementMs: 0 }
+};
+const platform = createPlatformState();
 
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -23,6 +30,119 @@ const contentTypes = {
   '.jpeg': 'image/jpeg',
   '.ico': 'image/x-icon'
 };
+
+function createPlatformState() {
+  return {
+    profiles: new Map(),
+    puzzles: [
+      {
+        id: 'back-rank-1',
+        title: 'Back rank tactic',
+        theme: 'Mate in 1',
+        fen: '6k1/5ppp/8/8/8/8/5PPP/6RK w - - 0 1',
+        solution: ['Re8#'],
+        hint: 'Use the open file and the trapped king.'
+      },
+      {
+        id: 'fork-1',
+        title: 'Fork the queen',
+        theme: 'Knight fork',
+        fen: 'r3k2r/ppp2ppp/2n5/3q4/3P4/2N2N2/PPP2PPP/R2QKB1R w KQkq - 0 1',
+        solution: ['Nxd5'],
+        hint: 'A central knight captures with tempo.'
+      },
+      {
+        id: 'skewer-1',
+        title: 'Win the rook',
+        theme: 'Skewer',
+        fen: '4r1k1/5ppp/8/8/8/5Q2/5PPP/6K1 w - - 0 1',
+        solution: ['Qd5'],
+        hint: 'Check first, then collect the heavy piece.'
+      }
+    ],
+    lessons: [
+      { id: 'opening', title: 'Opening principles', progress: 86, text: 'Control the center, develop minor pieces, castle before launching attacks.' },
+      { id: 'tactics', title: 'Tactical vision', progress: 58, text: 'Train pins, forks, skewers, discovered attacks, and forcing move checks.' },
+      { id: 'endgames', title: 'Endgame basics', progress: 42, text: 'Convert king and pawn endings with opposition, outside passers, and activity.' }
+    ],
+    events: [
+      { id: 'rapid-arena', title: 'Rapid Arena', status: 'Live', players: 128, time: '10|5', mode: 'rapid' },
+      { id: 'weekend-swiss', title: 'Weekend Swiss', status: 'Registering', players: 64, time: '15|10', mode: 'rapid' },
+      { id: 'puzzle-storm', title: 'Puzzle Storm', status: 'Open', players: 420, time: '3 min', mode: 'blitz' }
+    ],
+    analyses: new Map()
+  };
+}
+
+function cleanName(name) {
+  const trimmed = String(name || 'Guest').trim().replace(/\s+/g, ' ');
+  return trimmed ? trimmed.slice(0, 24) : 'Guest';
+}
+
+function profileFor(clientId, name = 'Guest') {
+  const id = String(clientId || 'guest');
+  if (!platform.profiles.has(id)) {
+    platform.profiles.set(id, {
+      clientId: id,
+      name: cleanName(name),
+      rapid: 1248,
+      puzzle: 1810,
+      games: 0,
+      wins: 0,
+      botGames: 0,
+      puzzlesSolved: 0,
+      lessonsCompleted: 0,
+      eventsJoined: 0,
+      accuracy: 82,
+      streak: 0,
+      lastSeen: Date.now()
+    });
+  }
+  const profile = platform.profiles.get(id);
+  profile.name = cleanName(name || profile.name);
+  profile.lastSeen = Date.now();
+  return profile;
+}
+
+function publicProfile(profile) {
+  return { ...profile };
+}
+
+function leaderboard() {
+  const seeded = [
+    { name: 'NakamuraFan', rapid: 2681, puzzle: 2760, streak: 18 },
+    { name: 'BangkokBishop', rapid: 2440, puzzle: 2325, streak: 11 },
+    { name: 'EndgameLab', rapid: 2312, puzzle: 2410, streak: 7 },
+    { name: 'KnightShift', rapid: 2204, puzzle: 2252, streak: 5 }
+  ];
+  return [...Array.from(platform.profiles.values()), ...seeded]
+    .sort((a, b) => b.rapid - a.rapid)
+    .slice(0, 10)
+    .map((player, index) => ({
+      rank: index + 1,
+      name: player.name,
+      rating: player.rapid,
+      puzzle: player.puzzle,
+      streak: `+${player.streak || 0}`
+    }));
+}
+
+function platformPayload(clientId = 'guest', name = 'Guest') {
+  const profile = profileFor(clientId, name);
+  return {
+    profile: publicProfile(profile),
+    puzzles: platform.puzzles,
+    lessons: platform.lessons,
+    events: platform.events,
+    leaderboard: leaderboard(),
+    timeControls: [
+      { id: 'bullet', label: '1 min', meta: 'Bullet' },
+      { id: 'blitz', label: '3|2', meta: 'Blitz' },
+      { id: 'rapid', label: '10|5', meta: 'Rapid' },
+      { id: 'daily', label: 'Daily', meta: 'Correspondence' }
+    ]
+  };
+}
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -154,8 +274,97 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === 'POST' && url.pathname === '/api/rooms') {
-    const room = rooms.createRoom();
+    const body = await readBody(request);
+    const control = timeControls[String(body.timeControl || 'rapid')] || timeControls.rapid;
+    const room = rooms.createRoom(control);
     sendJson(response, 201, { room: rooms.serialize(room) });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/platform') {
+    sendJson(response, 200, platformPayload(url.searchParams.get('clientId'), url.searchParams.get('name')));
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/platform/puzzle-result') {
+    const body = await readBody(request);
+    const profile = profileFor(body.clientId, body.name);
+    if (body.solved) {
+      profile.puzzlesSolved += 1;
+      profile.puzzle += 8;
+      profile.streak += 1;
+    } else {
+      profile.streak = 0;
+      profile.puzzle = Math.max(100, profile.puzzle - 2);
+    }
+    sendJson(response, 200, platformPayload(body.clientId, body.name));
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/platform/bot-result') {
+    const body = await readBody(request);
+    const profile = profileFor(body.clientId, body.name);
+    profile.botGames += 1;
+    profile.games += 1;
+    if (body.result === 'win') {
+      profile.wins += 1;
+      profile.rapid += 6;
+      profile.streak += 1;
+    } else if (body.result === 'loss') {
+      profile.rapid = Math.max(100, profile.rapid - 4);
+      profile.streak = 0;
+    }
+    profile.accuracy = Math.min(99, Math.round(78 + profile.wins * 1.2 + profile.puzzlesSolved * 0.2));
+    sendJson(response, 200, platformPayload(body.clientId, body.name));
+    return;
+  }
+
+  if (request.method === 'POST' && parts[1] === 'events' && parts[3] === 'register') {
+    const body = await readBody(request);
+    const event = platform.events.find((candidate) => candidate.id === parts[2]);
+    if (!event) {
+      sendError(response, 404, 'Event not found');
+      return;
+    }
+    const profile = profileFor(body.clientId, body.name);
+    profile.eventsJoined += 1;
+    event.players += 1;
+    const room = rooms.createRoom(timeControls[event.mode] || timeControls.rapid);
+    sendJson(response, 200, { ...platformPayload(body.clientId, body.name), room: rooms.serialize(room) });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/platform/lesson-complete') {
+    const body = await readBody(request);
+    const profile = profileFor(body.clientId, body.name);
+    const lesson = platform.lessons.find((candidate) => candidate.id === body.lessonId);
+    profile.lessonsCompleted += 1;
+    profile.rapid += 1;
+    if (lesson) lesson.progress = Math.min(100, lesson.progress + 7);
+    sendJson(response, 200, platformPayload(body.clientId, body.name));
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/platform/analysis') {
+    const body = await readBody(request);
+    const id = `ana-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    platform.analyses.set(id, {
+      id,
+      fen: String(body.fen || ''),
+      name: cleanName(body.name),
+      createdAt: Date.now()
+    });
+    sendJson(response, 201, { analysis: platform.analyses.get(id) });
+    return;
+  }
+
+  if (request.method === 'GET' && parts[1] === 'analysis' && parts[2]) {
+    const analysis = platform.analyses.get(parts[2]);
+    if (!analysis) {
+      sendError(response, 404, 'Analysis not found');
+      return;
+    }
+    sendJson(response, 200, { analysis });
     return;
   }
 

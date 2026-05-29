@@ -4,6 +4,9 @@
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: #151716;
   color: #f5f2ea;
+  --board-size: 560px;
+  --compact-board-size: 420px;
+  --mini-board-size: 360px;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -404,7 +407,13 @@ input:focus {
 }
 
 .compact-board {
-  width: min(100%, 32rem, calc(100vh - 12rem));
+  --current-board-size: var(--compact-board-size);
+  width: var(--compact-board-size);
+  min-width: var(--compact-board-size);
+  max-width: var(--compact-board-size);
+  height: var(--compact-board-size);
+  min-height: var(--compact-board-size);
+  max-height: var(--compact-board-size);
 }
 
 .training-layout,
@@ -465,7 +474,8 @@ input:focus {
 }
 
 .event-card .mini-board {
-  width: 100%;
+  width: var(--mini-board-size);
+  max-width: 100%;
 }
 
 .event-status {
@@ -492,10 +502,16 @@ input:focus {
 }
 
 .mini-board {
+  --mini-board-border: 8px;
   display: grid;
   grid-template-columns: repeat(8, 1fr);
-  width: min(100%, 28rem);
-  aspect-ratio: 1;
+  grid-template-rows: repeat(8, 1fr);
+  width: var(--mini-board-size);
+  min-width: var(--mini-board-size);
+  max-width: var(--mini-board-size);
+  height: var(--mini-board-size);
+  min-height: var(--mini-board-size);
+  max-height: var(--mini-board-size);
   overflow: hidden;
   border: 8px solid #24201b;
   border-radius: 8px;
@@ -503,11 +519,14 @@ input:focus {
 }
 
 .mini-board.small {
+  --mini-board-border: 4px;
   border-width: 4px;
 }
 
 .mini-board span {
   display: grid;
+  width: 100%;
+  height: 100%;
   place-items: center;
   min-width: 0;
   font-family: "Times New Roman", Georgia, serif;
@@ -590,9 +609,10 @@ input:focus {
 
 .game-grid {
   display: grid;
-  grid-template-columns: minmax(16rem, 19rem) minmax(24rem, 1fr) minmax(17rem, 21rem);
+  grid-template-columns: 19rem var(--board-size) 21rem;
   gap: 1rem;
   align-items: start;
+  justify-content: center;
   padding-top: 1rem;
 }
 
@@ -672,11 +692,14 @@ input:focus {
   display: grid;
   gap: 0.8rem;
   justify-items: center;
+  align-content: start;
+  min-width: var(--board-size);
 }
 
 .status-strip {
   justify-content: space-between;
-  width: min(100%, 42rem);
+  width: var(--board-size);
+  max-width: var(--board-size);
   min-height: 4.2rem;
   padding: 0.8rem 1rem;
 }
@@ -702,20 +725,39 @@ input:focus {
 }
 
 .board {
+  --current-board-size: var(--board-size);
+  --board-border: 8px;
   display: grid;
   grid-template-columns: repeat(8, 1fr);
-  width: min(100%, 42rem, calc(100vh - 10rem));
-  aspect-ratio: 1;
+  grid-template-rows: repeat(8, 1fr);
+  width: var(--board-size);
+  min-width: var(--board-size);
+  max-width: var(--board-size);
+  height: var(--board-size);
+  min-height: var(--board-size);
+  max-height: var(--board-size);
   overflow: hidden;
-  border: 8px solid #24201b;
+  border: var(--board-border) solid #24201b;
   border-radius: 8px;
   box-shadow:
     0 28px 80px rgba(0, 0, 0, 0.38),
     0 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
+.board.compact-board {
+  --current-board-size: var(--compact-board-size);
+  width: var(--compact-board-size);
+  min-width: var(--compact-board-size);
+  max-width: var(--compact-board-size);
+  height: var(--compact-board-size);
+  min-height: var(--compact-board-size);
+  max-height: var(--compact-board-size);
+}
+
 .square {
   position: relative;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   border: 0;
@@ -760,7 +802,7 @@ input:focus {
   height: 100%;
   place-items: center;
   font-family: "Times New Roman", Georgia, serif;
-  font-size: clamp(2rem, 8vw, 4.6rem);
+  font-size: 4.3rem;
   line-height: 1;
   text-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
@@ -795,7 +837,8 @@ input:focus {
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.6rem;
-  width: min(100%, 42rem);
+  width: var(--board-size);
+  max-width: var(--board-size);
 }
 
 .action-bar button {
@@ -803,7 +846,9 @@ input:focus {
 }
 
 .activity-panel {
-  max-height: calc(100vh - 6rem);
+  height: 760px;
+  max-height: 760px;
+  overflow: hidden;
 }
 
 .activity-card {
@@ -824,8 +869,17 @@ input:focus {
   align-content: start;
   gap: 0.35rem;
   min-height: 8rem;
-  max-height: 34vh;
+  max-height: 255px;
   overflow: auto;
+}
+
+.compact-board .square {
+  width: 100%;
+  height: 100%;
+}
+
+.compact-board .piece {
+  font-size: 3.2rem;
 }
 
 .move-row {
@@ -897,9 +951,35 @@ input:focus {
   gap: 0.7rem;
 }
 
+@media (max-width: 1500px) {
+  .game-grid {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .side-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: var(--board-size);
+  }
+
+  .room-card,
+  .activity-card {
+    grid-column: 1 / -1;
+  }
+
+  .activity-panel {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 @media (max-width: 1120px) {
   .platform-shell {
     grid-template-columns: 1fr;
+    --board-size: 480px;
+    --compact-board-size: 400px;
+    --mini-board-size: 320px;
   }
 
   .app-sidebar {
@@ -934,11 +1014,13 @@ input:focus {
   }
 
   .game-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 1fr;
+    justify-items: center;
   }
 
   .side-panel {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: var(--board-size);
   }
 
   .room-card,
@@ -947,11 +1029,19 @@ input:focus {
   }
 
   .activity-panel {
+    height: auto;
     max-height: none;
+    overflow: visible;
   }
 }
 
 @media (max-width: 720px) {
+  .platform-shell {
+    --board-size: 340px;
+    --compact-board-size: 320px;
+    --mini-board-size: 280px;
+  }
+
   .platform-shell .app-shell {
     padding: 0.75rem;
   }
@@ -996,15 +1086,26 @@ input:focus {
 
   .side-panel {
     grid-template-columns: 1fr;
+    width: var(--board-size);
   }
 
   .board {
+    --board-border: 4px;
     border-width: 4px;
-    width: min(100%, calc(100vh - 17rem));
+    width: var(--board-size);
+    min-width: var(--board-size);
+    max-width: var(--board-size);
+    height: var(--board-size);
+    min-height: var(--board-size);
+    max-height: var(--board-size);
   }
 
   .piece {
-    font-size: clamp(1.55rem, 11vw, 3.2rem);
+    font-size: 2.55rem;
+  }
+
+  .compact-board .piece {
+    font-size: 2.35rem;
   }
 
   .action-bar button {
