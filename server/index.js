@@ -2,14 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { AuthError, AuthStore } from './authStore.js';
 import { RoomStore } from './roomStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
+const dataDir = path.join(rootDir, 'data');
 const port = Number(process.env.PORT || 3001);
 const rooms = new RoomStore();
+const auth = new AuthStore({ filePath: path.join(dataDir, 'auth.json') });
 const streams = new Map();
 const timeControls = {
   bullet: { mode: 'bullet', clockMs: 60_000, incrementMs: 0 },
@@ -156,6 +159,41 @@ function sendError(response, status, message) {
   sendJson(response, status, { error: message });
 }
 
+function authTokenFrom(request, url = null) {
+  const authorization = request.headers.authorization || '';
+  if (authorization.toLowerCase().startsWith('bearer ')) return authorization.slice(7).trim();
+  return url?.searchParams.get('token') || '';
+}
+
+function authSessionFrom(request, url = null) {
+  return auth.authenticate(authTokenFrom(request, url));
+}
+
+function actorFrom(request, body = {}, url = null) {
+  const session = authSessionFrom(request, url);
+  if (session) {
+    return {
+      clientId: session.user.id,
+      name: session.user.username,
+      user: session.user
+    };
+  }
+
+  return {
+    clientId: String(body.clientId || ''),
+    name: cleanName(body.name),
+    user: null
+  };
+}
+
+function sendAuthError(response, error) {
+  if (error instanceof AuthError) {
+    sendError(response, error.status, error.message);
+    return;
+  }
+  sendError(response, 400, error.message || 'Authentication failed');
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -225,11 +263,12 @@ function serveStatic(request, response, url) {
 async function handleRoomAction(request, response, roomId, action) {
   try {
     const body = await readBody(request);
-    const clientId = String(body.clientId || '');
+    const actor = actorFrom(request, body);
+    const clientId = actor.clientId;
     let state;
 
     if (action === 'join') {
-      state = rooms.joinRoom(roomId, { id: clientId }, body);
+      state = rooms.joinRoom(roomId, { id: clientId }, { ...body, clientId, name: actor.name });
     } else if (action === 'move') {
       state = rooms.makeMove(roomId, clientId, body.move);
     } else if (action === 'resign') {
@@ -268,6 +307,61 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === 'GET' && url.pathname === '/api/auth/me') {
+    const session = authSessionFrom(request, url);
+    if (!session) {
+      sendError(response, 401, 'Not signed in');
+      return;
+    }
+    sendJson(response, 200, { user: session.user });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/auth/register') {
+    try {
+      const result = auth.register(await readBody(request));
+      profileFor(result.user.id, result.user.username);
+      sendJson(response, 201, result);
+    } catch (error) {
+      sendAuthError(response, error);
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/auth/login') {
+    try {
+      const result = auth.login(await readBody(request));
+      profileFor(result.user.id, result.user.username);
+      sendJson(response, 200, result);
+    } catch (error) {
+      sendAuthError(response, error);
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/auth/logout') {
+    auth.logout(authTokenFrom(request, url));
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
+  if (request.method === 'PATCH' && url.pathname === '/api/auth/profile') {
+    const session = authSessionFrom(request, url);
+    if (!session) {
+      sendError(response, 401, 'Not signed in');
+      return;
+    }
+
+    try {
+      const user = auth.updateProfile(session.user.id, await readBody(request));
+      profileFor(user.id, user.username);
+      sendJson(response, 200, { user });
+    } catch (error) {
+      sendAuthError(response, error);
+    }
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/rooms') {
     sendJson(response, 200, { rooms: rooms.listRooms() });
     return;
@@ -282,13 +376,22 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === 'GET' && url.pathname === '/api/platform') {
-    sendJson(response, 200, platformPayload(url.searchParams.get('clientId'), url.searchParams.get('name')));
+    const actor = actorFrom(
+      request,
+      {
+        clientId: url.searchParams.get('clientId'),
+        name: url.searchParams.get('name')
+      },
+      url
+    );
+    sendJson(response, 200, platformPayload(actor.clientId, actor.name));
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/platform/puzzle-result') {
     const body = await readBody(request);
-    const profile = profileFor(body.clientId, body.name);
+    const actor = actorFrom(request, body, url);
+    const profile = profileFor(actor.clientId, actor.name);
     if (body.solved) {
       profile.puzzlesSolved += 1;
       profile.puzzle += 8;
@@ -297,13 +400,14 @@ const server = createServer(async (request, response) => {
       profile.streak = 0;
       profile.puzzle = Math.max(100, profile.puzzle - 2);
     }
-    sendJson(response, 200, platformPayload(body.clientId, body.name));
+    sendJson(response, 200, platformPayload(actor.clientId, actor.name));
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/platform/bot-result') {
     const body = await readBody(request);
-    const profile = profileFor(body.clientId, body.name);
+    const actor = actorFrom(request, body, url);
+    const profile = profileFor(actor.clientId, actor.name);
     profile.botGames += 1;
     profile.games += 1;
     if (body.result === 'win') {
@@ -315,43 +419,46 @@ const server = createServer(async (request, response) => {
       profile.streak = 0;
     }
     profile.accuracy = Math.min(99, Math.round(78 + profile.wins * 1.2 + profile.puzzlesSolved * 0.2));
-    sendJson(response, 200, platformPayload(body.clientId, body.name));
+    sendJson(response, 200, platformPayload(actor.clientId, actor.name));
     return;
   }
 
   if (request.method === 'POST' && parts[1] === 'events' && parts[3] === 'register') {
     const body = await readBody(request);
+    const actor = actorFrom(request, body, url);
     const event = platform.events.find((candidate) => candidate.id === parts[2]);
     if (!event) {
       sendError(response, 404, 'Event not found');
       return;
     }
-    const profile = profileFor(body.clientId, body.name);
+    const profile = profileFor(actor.clientId, actor.name);
     profile.eventsJoined += 1;
     event.players += 1;
     const room = rooms.createRoom(timeControls[event.mode] || timeControls.rapid);
-    sendJson(response, 200, { ...platformPayload(body.clientId, body.name), room: rooms.serialize(room) });
+    sendJson(response, 200, { ...platformPayload(actor.clientId, actor.name), room: rooms.serialize(room) });
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/platform/lesson-complete') {
     const body = await readBody(request);
-    const profile = profileFor(body.clientId, body.name);
+    const actor = actorFrom(request, body, url);
+    const profile = profileFor(actor.clientId, actor.name);
     const lesson = platform.lessons.find((candidate) => candidate.id === body.lessonId);
     profile.lessonsCompleted += 1;
     profile.rapid += 1;
     if (lesson) lesson.progress = Math.min(100, lesson.progress + 7);
-    sendJson(response, 200, platformPayload(body.clientId, body.name));
+    sendJson(response, 200, platformPayload(actor.clientId, actor.name));
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/platform/analysis') {
     const body = await readBody(request);
+    const actor = actorFrom(request, body, url);
     const id = `ana-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     platform.analyses.set(id, {
       id,
       fen: String(body.fen || ''),
-      name: cleanName(body.name),
+      name: actor.name,
       createdAt: Date.now()
     });
     sendJson(response, 201, { analysis: platform.analyses.get(id) });
@@ -389,7 +496,15 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      const clientId = String(url.searchParams.get('clientId') || '');
+      const actor = actorFrom(
+        request,
+        {
+          clientId: url.searchParams.get('clientId'),
+          name: url.searchParams.get('name')
+        },
+        url
+      );
+      const clientId = actor.clientId;
       response.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',

@@ -218,6 +218,12 @@ function App() {
   const identity = useMemo(getStoredIdentity, []);
   const [clientId] = useState(identity.clientId);
   const [name, setName] = useState(identity.name);
+  const [authToken, setAuthToken] = useState(() => window.localStorage.getItem('chess-auth-token') || '');
+  const [authUser, setAuthUser] = useState(null);
+  const [authMode, setAuthMode] = useState(null);
+  const [authForm, setAuthForm] = useState({ username: '', email: '', login: '', password: '' });
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const [activeSection, setActiveSection] = useState(getInitialRoomId() ? 'play' : 'home');
   const [roomId, setRoomId] = useState(getInitialRoomId);
   const [room, setRoom] = useState(null);
@@ -232,14 +238,48 @@ function App() {
   const [now, setNow] = useState(Date.now());
   const [platform, setPlatform] = useState(defaultPlatform);
   const eventsRef = useRef(null);
+  const playerClientId = authUser?.id || clientId;
+  const playerName = authUser?.username || name || 'Guest';
 
   useEffect(() => {
-    window.localStorage.setItem('chess-player-name', name);
-  }, [name]);
+    if (!authUser) window.localStorage.setItem('chess-player-name', name);
+  }, [authUser, name]);
 
   useEffect(() => {
     refreshPlatform();
-  }, [clientId, name]);
+  }, [playerClientId, playerName, authToken]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setAuthUser(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function restoreSession() {
+      try {
+        const response = await fetch(`${apiBase}/api/auth/me`, { headers: authHeaders() });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Session expired');
+        if (!cancelled) {
+          setAuthUser(data.user);
+          setName(data.user.username);
+        }
+      } catch {
+        if (!cancelled) {
+          window.localStorage.removeItem('chess-auth-token');
+          setAuthToken('');
+          setAuthUser(null);
+        }
+      }
+    }
+
+    restoreSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken]);
 
   useEffect(() => {
     if (!roomId) return undefined;
@@ -248,11 +288,15 @@ function App() {
 
     async function joinAndSubscribe() {
       try {
-        await postRoomAction(roomId, 'join', { clientId, name });
+        await postRoomAction(roomId, 'join', { clientId: playerClientId, name: playerName });
         if (cancelled) return;
 
         eventsRef.current?.close();
-        const stream = new EventSource(`${apiBase}/api/rooms/${roomId}/events?clientId=${encodeURIComponent(clientId)}`);
+        const streamUrl = new URL(`${apiBase}/api/rooms/${roomId}/events`);
+        streamUrl.searchParams.set('clientId', playerClientId);
+        streamUrl.searchParams.set('name', playerName);
+        if (authToken) streamUrl.searchParams.set('token', authToken);
+        const stream = new EventSource(streamUrl);
         eventsRef.current = stream;
 
         stream.addEventListener('open', () => setConnected(true));
@@ -280,22 +324,94 @@ function App() {
       eventsRef.current = null;
       setConnected(false);
     };
-  }, [clientId, name, roomId]);
+  }, [playerClientId, playerName, authToken, roomId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(timer);
   }, []);
 
-  const viewerColor = room?.players.white?.clientId === clientId ? 'w' : room?.players.black?.clientId === clientId ? 'b' : null;
+  const viewerColor = room?.players.white?.clientId === playerClientId ? 'w' : room?.players.black?.clientId === playerClientId ? 'b' : null;
   const viewerRole = viewerColor === 'w' ? 'white' : viewerColor === 'b' ? 'black' : room ? 'spectator' : 'guest';
   const hasBothPlayers = Boolean(room?.players.white && room?.players.black);
   const canAct = Boolean(viewerColor && room && hasBothPlayers && !room.result);
   const inviteUrl = room ? `${window.location.origin}${window.location.pathname}?room=${room.id}` : '';
 
+  function authHeaders(headers = {}) {
+    return authToken ? { ...headers, Authorization: `Bearer ${authToken}` } : headers;
+  }
+
+  function updateAuthForm(field, value) {
+    setAuthForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function openAuth(nextMode) {
+    setAuthMode(nextMode);
+    setAuthError('');
+    setAuthForm({
+      username: authUser?.username || name,
+      email: authUser?.email || '',
+      login: authUser?.email || '',
+      password: ''
+    });
+  }
+
+  async function submitAuth(event) {
+    event.preventDefault();
+    setAuthBusy(true);
+    setAuthError('');
+
+    try {
+      const isProfile = authMode === 'profile';
+      const endpoint = isProfile ? '/api/auth/profile' : `/api/auth/${authMode}`;
+      const method = isProfile ? 'PATCH' : 'POST';
+      const payload =
+        authMode === 'login'
+          ? { login: authForm.login, password: authForm.password }
+          : isProfile
+            ? { username: authForm.username }
+            : { username: authForm.username, email: authForm.email, password: authForm.password };
+      const response = await fetch(`${apiBase}${endpoint}`, {
+        method,
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Authentication failed');
+
+      if (data.token) {
+        window.localStorage.setItem('chess-auth-token', data.token);
+        setAuthToken(data.token);
+      }
+      setAuthUser(data.user);
+      setName(data.user.username);
+      setAuthMode(null);
+      setAuthForm({ username: '', email: '', login: '', password: '' });
+    } catch (error) {
+      setAuthError(error.message || 'Authentication failed');
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function logout() {
+    try {
+      await fetch(`${apiBase}/api/auth/logout`, { method: 'POST', headers: authHeaders() });
+    } catch {
+      // Local logout still clears the browser session if the network is unavailable.
+    }
+    window.localStorage.removeItem('chess-auth-token');
+    setAuthToken('');
+    setAuthUser(null);
+    setAuthMode(null);
+  }
+
   async function refreshPlatform() {
     try {
-      const response = await fetch(`${apiBase}/api/platform?clientId=${encodeURIComponent(clientId)}&name=${encodeURIComponent(name)}`);
+      const response = await fetch(
+        `${apiBase}/api/platform?clientId=${encodeURIComponent(playerClientId)}&name=${encodeURIComponent(playerName)}`,
+        { headers: authHeaders() }
+      );
       if (!response.ok) throw new Error('Platform unavailable');
       setPlatform(await response.json());
     } catch {
@@ -306,8 +422,8 @@ function App() {
   async function postPlatformAction(path, payload = {}) {
     const response = await fetch(`${apiBase}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, name, ...payload })
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ clientId: playerClientId, name: playerName, ...payload })
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Request failed');
@@ -355,7 +471,7 @@ function App() {
   async function postRoomAction(targetRoomId, action, payload = {}) {
     const response = await fetch(`${apiBase}/api/rooms/${targetRoomId}/${action}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload)
     });
     const data = await response.json();
@@ -366,7 +482,7 @@ function App() {
   async function emit(eventName, payload = {}) {
     const action = eventName.replace('room:', '');
     try {
-      await postRoomAction(roomId, action, { clientId, ...payload });
+      await postRoomAction(roomId, action, { clientId: playerClientId, name: playerName, ...payload });
     } catch (error) {
       setNotice(error.message || 'Something went wrong');
     }
@@ -455,18 +571,15 @@ function App() {
             <span className="eyebrow">{activeSection}</span>
             <h1 className="page-title">{room ? `Room ${room.id}` : sectionTitle(activeSection)}</h1>
           </div>
-          <div className="profile">
-            <input
-              aria-label="Player name"
-              maxLength={24}
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Your name"
-            />
-            <span className={`connection ${connected ? 'online' : ''}`}>
-              {room ? (connected ? 'online' : 'connecting') : 'offline-ready'}
-            </span>
-          </div>
+          <AuthPanel
+            authUser={authUser}
+            name={name}
+            setName={setName}
+            connected={connected}
+            room={room}
+            openAuth={openAuth}
+            logout={logout}
+          />
         </section>
 
         {room ? (
@@ -495,8 +608,8 @@ function App() {
             section={activeSection}
             setActiveSection={setActiveSection}
             platform={platform}
-            clientId={clientId}
-            name={name}
+            clientId={playerClientId}
+            name={playerName}
             postPlatformAction={postPlatformAction}
             joinInput={joinInput}
             setJoinInput={setJoinInput}
@@ -507,7 +620,129 @@ function App() {
         )}
 
         {pendingPromotion && <PromotionDialog choosePromotion={choosePromotion} />}
+        {authMode && (
+          <AuthDialog
+            mode={authMode}
+            form={authForm}
+            error={authError}
+            busy={authBusy}
+            updateForm={updateAuthForm}
+            submitAuth={submitAuth}
+            close={() => setAuthMode(null)}
+            switchMode={openAuth}
+          />
+        )}
       </main>
+    </div>
+  );
+}
+
+function AuthPanel({ authUser, name, setName, connected, room, openAuth, logout }) {
+  const connectionLabel = room ? (connected ? 'online' : 'connecting') : 'offline-ready';
+
+  if (authUser) {
+    return (
+      <div className="profile auth-profile">
+        <div className="account-chip">
+          <span className="label">Account</span>
+          <strong>{authUser.username}</strong>
+        </div>
+        <button onClick={() => openAuth('profile')}>Edit</button>
+        <button onClick={logout}>Logout</button>
+        <span className={`connection ${connected ? 'online' : ''}`}>{connectionLabel}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="profile auth-profile">
+      <input
+        aria-label="Player name"
+        maxLength={24}
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="Guest name"
+      />
+      <button onClick={() => openAuth('login')}>Login</button>
+      <button className="primary-action" onClick={() => openAuth('register')}>Register</button>
+      <span className={`connection ${connected ? 'online' : ''}`}>{connectionLabel}</span>
+    </div>
+  );
+}
+
+function AuthDialog({ mode, form, error, busy, updateForm, submitAuth, close, switchMode }) {
+  const isLogin = mode === 'login';
+  const isRegister = mode === 'register';
+  const isProfile = mode === 'profile';
+  const title = isProfile ? 'Edit account' : isLogin ? 'Login' : 'Create account';
+
+  return (
+    <div className="auth-backdrop" role="presentation">
+      <form className="auth-dialog" onSubmit={submitAuth}>
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">Account</span>
+            <h2>{title}</h2>
+          </div>
+          <button type="button" onClick={close}>Close</button>
+        </div>
+
+        {(isRegister || isProfile) && (
+          <label>
+            <span className="label">Username</span>
+            <input
+              value={form.username}
+              onChange={(event) => updateForm('username', event.target.value)}
+              minLength={3}
+              maxLength={24}
+              required
+            />
+          </label>
+        )}
+
+        {isRegister && (
+          <label>
+            <span className="label">Email</span>
+            <input
+              type="email"
+              value={form.email}
+              onChange={(event) => updateForm('email', event.target.value)}
+              required
+            />
+          </label>
+        )}
+
+        {isLogin && (
+          <label>
+            <span className="label">Username or email</span>
+            <input value={form.login} onChange={(event) => updateForm('login', event.target.value)} required />
+          </label>
+        )}
+
+        {!isProfile && (
+          <label>
+            <span className="label">Password</span>
+            <input
+              type="password"
+              value={form.password}
+              onChange={(event) => updateForm('password', event.target.value)}
+              minLength={8}
+              required
+            />
+          </label>
+        )}
+
+        {error && <p className="notice">{error}</p>}
+        <button className="primary-action" disabled={busy}>
+          {busy ? 'Saving...' : title}
+        </button>
+
+        {!isProfile && (
+          <button type="button" onClick={() => switchMode(isLogin ? 'register' : 'login')}>
+            {isLogin ? 'Need an account?' : 'Already registered?'}
+          </button>
+        )}
+      </form>
     </div>
   );
 }
