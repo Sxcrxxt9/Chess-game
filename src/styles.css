@@ -540,6 +540,17 @@ input:focus {
   font-weight: 800;
 }
 
+.bracket-list {
+  display: grid;
+  gap: 0.35rem;
+  border-top: 1px solid rgba(245, 242, 234, 0.1);
+  padding-top: 0.65rem;
+}
+
+.bracket-list span {
+  color: #d9d2c7;
+}
+
 .community-layout {
   grid-template-columns: minmax(22rem, 34rem) minmax(0, 1fr);
 }

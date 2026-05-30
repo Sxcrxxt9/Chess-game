@@ -4,6 +4,15 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { AuthError, AuthStore } from './authStore.js';
 import { createPersistenceStore } from './persistenceStore.js';
+import {
+  EngineCluster,
+  FairPlayService,
+  MatchmakingService,
+  ModerationService,
+  ObservabilityService,
+  RatingService,
+  TournamentService
+} from './productionServices.js';
 import { RoomStore } from './roomStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,6 +24,13 @@ const port = Number(process.env.PORT || 3001);
 const persistence = await createPersistenceStore({ filePath: path.join(dataDir, 'chess.sqlite') });
 const rooms = new RoomStore({ persistence });
 const auth = new AuthStore({ persistence });
+const observability = new ObservabilityService({ persistence });
+const moderation = new ModerationService({ persistence });
+const rating = new RatingService({ persistence });
+const fairplay = new FairPlayService({ persistence });
+const matchmaking = new MatchmakingService({ persistence });
+const tournaments = new TournamentService({ persistence });
+const engine = new EngineCluster({ persistence });
 const streams = new Map();
 const timeControls = {
   bullet: { mode: 'bullet', clockMs: 60_000, incrementMs: 0 },
@@ -149,6 +165,10 @@ function platformPayload(clientId = 'guest', name = 'Guest') {
     events: platform.events,
     leaderboard: leaderboard(),
     recentGames: rooms.historyForClient(profile.clientId),
+    matchmaking: { queued: matchmaking.queue.length },
+    tournaments: tournaments.tournaments,
+    observability: observability.snapshot(),
+    engine: engine.snapshot(),
     timeControls: [
       { id: 'bullet', label: '1 min', meta: 'Bullet' },
       { id: 'blitz', label: '3|2', meta: 'Blitz' },
@@ -203,6 +223,17 @@ function sendAuthError(response, error) {
     return;
   }
   sendError(response, 400, error.message || 'Authentication failed');
+}
+
+function createPairedRoom(white, black, mode = 'rapid') {
+  const room = rooms.createRoom(timeControls[mode] || timeControls.rapid);
+  rooms.joinRoom(room.id, { id: white.clientId }, { clientId: white.clientId, name: white.name });
+  rooms.joinRoom(room.id, { id: black.clientId }, { clientId: black.clientId, name: black.name });
+  return rooms.serialize(room);
+}
+
+function applyRatedResult(room) {
+  return rating.apply(room, { profileFor, saveProfile });
 }
 
 function readBody(request) {
@@ -263,10 +294,18 @@ function serveStatic(request, response, url) {
   }
 
   const fallbackPath = path.join(distDir, 'index.html');
-  const finalPath = fs.existsSync(filePath) && fs.statSync(filePath).isFile() ? filePath : fallbackPath;
+  const isAssetPath = requestedPath.startsWith('/assets/');
+  const hasFile = fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+
+  if (isAssetPath && !hasFile) {
+    sendError(response, 404, 'Asset not found. Run npm run build before starting the server.');
+    return;
+  }
+
+  const finalPath = hasFile ? filePath : fallbackPath;
   response.writeHead(200, {
     'Content-Type': contentTypes[path.extname(finalPath)] || 'application/octet-stream',
-    'Cache-Control': 'no-store'
+    'Cache-Control': isAssetPath ? 'public, max-age=31536000, immutable' : 'no-store'
   });
   fs.createReadStream(finalPath).pipe(response);
 }
@@ -291,13 +330,20 @@ async function handleRoomAction(request, response, roomId, action) {
     } else if (action === 'rematch') {
       state = rooms.requestRematch(roomId, clientId);
     } else if (action === 'chat') {
-      state = rooms.addChat(roomId, clientId, body.text);
+      const review = moderation.reviewText(body.text);
+      if (!review.allowed) throw new Error('Message cannot be empty');
+      state = rooms.addChat(roomId, clientId, review.cleaned);
     } else {
       sendError(response, 404, 'Not found');
       return;
     }
 
-    broadcastRoom(rooms.requiredRoom(roomId));
+    const room = rooms.requiredRoom(roomId);
+    if (action === 'move') {
+      fairplay.recordMove({ roomId, clientId, san: state.lastMove?.san, moveNumber: state.history.length });
+    }
+    applyRatedResult(room);
+    broadcastRoom(room);
     sendJson(response, 200, { room: state });
   } catch (error) {
     sendError(response, error.message === 'Room not found' ? 404 : 400, error.message);
@@ -305,6 +351,7 @@ async function handleRoomAction(request, response, roomId, action) {
 }
 
 const server = createServer(async (request, response) => {
+  observability.middleware(request, response);
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   const parts = url.pathname.split('/').filter(Boolean);
 
@@ -314,7 +361,12 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === 'GET' && url.pathname === '/api/health') {
-    sendJson(response, 200, { ok: true, uptime: process.uptime(), storage: persistence.stats() });
+    sendJson(response, 200, { ok: true, uptime: process.uptime(), storage: persistence.stats(), engine: engine.snapshot() });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/metrics') {
+    sendJson(response, 200, { metrics: observability.snapshot(), storage: persistence.stats(), fairplay: fairplay.snapshot() });
     return;
   }
 
@@ -409,6 +461,85 @@ const server = createServer(async (request, response) => {
       url
     );
     sendJson(response, 200, { games: rooms.historyForClient(actor.clientId, 30) });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/matchmaking/join') {
+    const body = await readBody(request);
+    const actor = actorFrom(request, body, url);
+    const profile = profileFor(actor.clientId, actor.name);
+    const result = matchmaking.join({
+      clientId: actor.clientId,
+      name: actor.name,
+      rating: profile.rapid,
+      mode: body.mode || 'rapid',
+      createMatch: (white, black) => createPairedRoom(white, black, body.mode || 'rapid')
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/matchmaking/leave') {
+    const body = await readBody(request);
+    const actor = actorFrom(request, body, url);
+    sendJson(response, 200, matchmaking.leave(actor.clientId));
+    return;
+  }
+
+  if (request.method === 'POST' && parts[1] === 'moderation' && parts[2] === 'report') {
+    const body = await readBody(request);
+    const actor = actorFrom(request, body, url);
+    const report = moderation.report({ reporterId: actor.clientId, targetId: body.targetId, roomId: body.roomId, reason: body.reason });
+    sendJson(response, 201, { report });
+    return;
+  }
+
+  if (request.method === 'GET' && parts[1] === 'fairplay') {
+    sendJson(response, 200, { fairplay: fairplay.snapshot(parts[2]) });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/tournaments') {
+    sendJson(response, 200, { tournaments: tournaments.tournaments });
+    return;
+  }
+
+  if (request.method === 'POST' && parts[1] === 'tournaments' && parts[3] === 'register') {
+    const body = await readBody(request);
+    const actor = actorFrom(request, body, url);
+    const profile = profileFor(actor.clientId, actor.name);
+    const tournament = tournaments.register({
+      tournamentId: parts[2],
+      player: { clientId: actor.clientId, name: actor.name, rating: profile.rapid },
+      createRoom: (white, black) => createPairedRoom(white, black, 'rapid')
+    });
+    if (!tournament) {
+      sendError(response, 404, 'Tournament not found');
+      return;
+    }
+    sendJson(response, 200, { tournament, tournaments: tournaments.tournaments });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/engine/analyze') {
+    const body = await readBody(request);
+    const actor = actorFrom(request, body, url);
+    try {
+      const job = engine.submit({ fen: body.fen, depth: body.depth, requestedBy: actor.clientId });
+      sendJson(response, 202, { job });
+    } catch (error) {
+      sendError(response, 400, error.message);
+    }
+    return;
+  }
+
+  if (request.method === 'GET' && parts[1] === 'engine' && parts[2] === 'jobs' && parts[3]) {
+    const job = engine.get(parts[3]);
+    if (!job) {
+      sendError(response, 404, 'Engine job not found');
+      return;
+    }
+    sendJson(response, 200, { job });
     return;
   }
 
@@ -564,6 +695,7 @@ const server = createServer(async (request, response) => {
 
 setInterval(() => {
   for (const room of rooms.tickClocks()) {
+    applyRatedResult(room);
     broadcastRoom(room);
   }
 }, 1000).unref();

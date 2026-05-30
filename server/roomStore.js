@@ -90,6 +90,7 @@ export class RoomStore {
       clockMs,
       incrementMs,
       mode: options.mode || 'rapid',
+      gameNumber: 1,
       activeSince: null,
       result: null,
       drawOfferBy: null,
@@ -318,6 +319,7 @@ export class RoomStore {
       room.players.w = room.players.b;
       room.players.b = previousWhite;
       room.game = new Chess();
+      room.gameNumber = (room.gameNumber || 1) + 1;
       room.clock = { w: room.clockMs, b: room.clockMs };
       room.activeSince = room.players.w && room.players.b ? Date.now() : null;
       room.result = null;
@@ -422,6 +424,7 @@ export class RoomStore {
       clockMs: state.clockMs || this.clockMs,
       incrementMs: state.incrementMs || this.incrementMs,
       mode: state.mode || 'rapid',
+      gameNumber: state.gameNumber || 1,
       activeSince: state.result || !players.w || !players.b ? null : Date.now(),
       result: state.result || null,
       drawOfferBy: state.drawOfferBy || null,
@@ -455,6 +458,7 @@ export class RoomStore {
       clockMs: room.clockMs,
       incrementMs: room.incrementMs,
       mode: room.mode,
+      gameNumber: room.gameNumber,
       result: room.result,
       drawOfferBy: room.drawOfferBy,
       rematchVotes: Array.from(room.rematchVotes),

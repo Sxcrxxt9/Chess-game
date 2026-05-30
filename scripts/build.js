@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 const root = process.cwd();
@@ -29,9 +30,22 @@ if (result.status !== 0) {
   process.exit(result.status || 1);
 }
 
+function fingerprint(filePath) {
+  const contents = fs.readFileSync(filePath);
+  return createHash('sha256').update(contents).digest('hex').slice(0, 10);
+}
+
+const jsHash = fingerprint(path.join(dist, 'assets', 'app.js'));
+const cssHash = fingerprint(path.join(dist, 'assets', 'app.css'));
+const jsName = `app.${jsHash}.js`;
+const cssName = `app.${cssHash}.css`;
+
+fs.renameSync(path.join(dist, 'assets', 'app.js'), path.join(dist, 'assets', jsName));
+fs.renameSync(path.join(dist, 'assets', 'app.css'), path.join(dist, 'assets', cssName));
+
 const html = fs
   .readFileSync(path.join(root, 'index.html'), 'utf8')
-  .replace('/src/main.jsx', '/assets/app.js')
-  .replace('</head>', '    <link rel="stylesheet" href="/assets/app.css" />\n  </head>');
+  .replace('/src/main.jsx', `/assets/${jsName}`)
+  .replace('</head>', `    <link rel="stylesheet" href="/assets/${cssName}" />\n  </head>`);
 
 fs.writeFileSync(path.join(dist, 'index.html'), html);

@@ -20,6 +20,14 @@ A production-minded realtime chess project built with React, native HTTP, Server
 - Responsive desktop/mobile layout
 - Register/login/logout/edit profile with salted password hashing
 - Durable SQLite-backed storage for accounts, sessions, profiles, rooms, moves, chat, analysis saves, event state, and recent game history
+- Rated matchmaking queue with automatic room creation
+- Elo-style online rating updates after decisive/drawn games
+- Fair-play signal tracking for suspicious fast-move patterns
+- Moderation reporting and chat filtering
+- Four-player tournament bracket generation with playable rooms
+- Engine-analysis job queue with worker-style concurrency
+- Observability metrics at `/api/metrics`
+- Fingerprinted CDN-ready assets and Render Blueprint deployment config
 
 ## Local Development
 
@@ -42,7 +50,7 @@ npm start
 
 `npm start` serves the built client from `dist` and the realtime HTTP/SSE server from the same process.
 
-Production health is available at `GET /api/health`; it returns uptime and storage counts.
+Production health is available at `GET /api/health`; it returns uptime, storage counts, and engine-worker status. Render deployment is configured in `render.yaml`; attach the included disk so `data/chess.sqlite` survives deploys and restarts.
 
 ## Checks
 

@@ -129,6 +129,10 @@ const defaultPlatform = {
   events,
   leaderboard,
   recentGames: [],
+  matchmaking: { queued: 0 },
+  tournaments: [],
+  observability: { requests: 0, errors: 0, avgLatencyMs: 0 },
+  engine: { size: 1, active: 0, queued: 0 },
   timeControls
 };
 
@@ -428,7 +432,9 @@ function App() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Request failed');
-    if (data.profile || data.leaderboard || data.events) setPlatform(data);
+    if (data.profile || data.leaderboard || data.events || data.tournaments || data.matchmaking || data.observability) {
+      setPlatform((current) => ({ ...current, ...data }));
+    }
     return data;
   }
 
@@ -533,6 +539,20 @@ function App() {
     setChatInput('');
   }
 
+  async function reportRoom() {
+    if (!room) return;
+    try {
+      await postPlatformAction('/api/moderation/report', {
+        roomId: room.id,
+        targetId: room.players.white?.clientId === playerClientId ? room.players.black?.clientId : room.players.white?.clientId,
+        reason: 'In-room player report'
+      });
+      setNotice('Report sent to moderation');
+    } catch (error) {
+      setNotice(error.message || 'Could not send report');
+    }
+  }
+
   function navigate(sectionId) {
     setActiveSection(sectionId);
     if (sectionId !== 'play' && roomId) leaveRoom();
@@ -603,6 +623,7 @@ function App() {
             setChatInput={setChatInput}
             sendChat={sendChat}
             leaveRoom={leaveRoom}
+            reportRoom={reportRoom}
           />
         ) : (
           <SectionRenderer
@@ -863,6 +884,22 @@ function FeatureTile({ icon, title, text, onClick }) {
 }
 
 function PlayCenter({ joinInput, setJoinInput, createRoom, enterRoom, notice, platform, postPlatformAction }) {
+  const [matchmakingNotice, setMatchmakingNotice] = useState('');
+
+  async function joinMatchmaking(mode = 'rapid') {
+    try {
+      const data = await postPlatformAction('/api/matchmaking/join', { mode });
+      if (data.room?.id) {
+        setMatchmakingNotice('Match found');
+        enterRoom(data.room.id);
+      } else {
+        setMatchmakingNotice(`Queued for ${mode}. Waiting players: ${data.queue || 1}`);
+      }
+    } catch (error) {
+      setMatchmakingNotice(error.message || 'Matchmaking unavailable');
+    }
+  }
+
   return (
     <section className="play-layout">
       <div className="mode-panel">
@@ -881,6 +918,17 @@ function PlayCenter({ joinInput, setJoinInput, createRoom, enterRoom, notice, pl
             </button>
           ))}
         </div>
+        <section className="join-box play-card">
+          <div>
+            <span className="eyebrow">Matchmaking</span>
+            <h2>Rated queue</h2>
+            <p>{matchmakingNotice || `${platform.matchmaking?.queued || 0} players waiting`}</p>
+          </div>
+          <button className="primary-action" onClick={() => joinMatchmaking('rapid')}>
+            <Icon name="users" />
+            Find rapid match
+          </button>
+        </section>
       </div>
       <BotArena postPlatformAction={postPlatformAction} />
     </section>
@@ -1104,6 +1152,7 @@ function AnalysisLab({ postPlatformAction }) {
   const [lastMove, setLastMove] = useState(null);
   const [error, setError] = useState('');
   const [savedAnalysis, setSavedAnalysis] = useState('');
+  const [engineJob, setEngineJob] = useState(null);
   const game = useMemo(() => {
     try {
       return new Chess(fen);
@@ -1156,6 +1205,16 @@ function AnalysisLab({ postPlatformAction }) {
     }
   }
 
+  async function runEngine() {
+    try {
+      const data = await postPlatformAction('/api/engine/analyze', { fen, depth: 12 });
+      setEngineJob(data.job);
+      setError('');
+    } catch {
+      setError('Could not queue engine analysis');
+    }
+  }
+
   return (
     <section className="analysis-layout">
       <div>
@@ -1168,6 +1227,7 @@ function AnalysisLab({ postPlatformAction }) {
         <div className="room-actions">
           <button onClick={loadFen}>Load FEN</button>
           <button onClick={saveAnalysis}>Save online</button>
+          <button onClick={runEngine}>Engine queue</button>
           <button onClick={() => {
             const start = new Chess().fen();
             setFen(start);
@@ -1181,6 +1241,14 @@ function AnalysisLab({ postPlatformAction }) {
         </div>
         {error && <p className="notice">{error}</p>}
         {savedAnalysis && <input aria-label="Saved analysis link" value={savedAnalysis} readOnly />}
+        {engineJob && (
+          <div className="analysis-readout">
+            <span>Engine job</span>
+            <strong>{engineJob.status}</strong>
+            <span>Depth</span>
+            <strong>{engineJob.depth}</strong>
+          </div>
+        )}
         <div className="analysis-readout">
           <span>Turn</span>
           <strong>{game.turn() === 'w' ? 'White' : 'Black'}</strong>
@@ -1195,9 +1263,20 @@ function AnalysisLab({ postPlatformAction }) {
 }
 
 function WatchCenter({ platform, postPlatformAction, enterRoom }) {
+  const [tournamentNotice, setTournamentNotice] = useState('');
+
   async function register(eventId) {
     const data = await postPlatformAction(`/api/events/${eventId}/register`);
     if (data.room?.id) enterRoom(data.room.id);
+  }
+
+  async function registerTournament(tournamentId) {
+    try {
+      const data = await postPlatformAction(`/api/tournaments/${tournamentId}/register`);
+      setTournamentNotice(`${data.tournament.title}: ${data.tournament.status}`);
+    } catch (error) {
+      setTournamentNotice(error.message || 'Tournament unavailable');
+    }
   }
 
   return (
@@ -1214,6 +1293,26 @@ function WatchCenter({ platform, postPlatformAction, enterRoom }) {
           <button onClick={() => register(event.id)}>Join event room</button>
         </article>
       ))}
+      {(platform.tournaments || []).map((tournament) => (
+        <article className="event-card" key={tournament.id}>
+          <span className="event-status registering">{tournament.status}</span>
+          <h2>{tournament.title}</h2>
+          <div className="event-meta">
+            <span>{tournament.players.length}/{tournament.size} players</span>
+            <span>{tournament.rounds.length ? `${tournament.rounds[0].matches.length} matches` : 'Bracket pending'}</span>
+          </div>
+          <button className="primary-action" onClick={() => registerTournament(tournament.id)}>Register bracket</button>
+          {tournament.rounds.map((round) => (
+            <div className="bracket-list" key={round.name}>
+              <strong>{round.name}</strong>
+              {round.matches.map((match) => (
+                <span key={match.id}>{match.white.name} vs {match.black.name} · Room {match.roomId}</span>
+              ))}
+            </div>
+          ))}
+        </article>
+      ))}
+      {tournamentNotice && <p className="notice">{tournamentNotice}</p>}
     </section>
   );
 }
@@ -1234,14 +1333,14 @@ function CommunityCenter({ platform, createRoom }) {
         ))}
       </article>
       <article className="community-card">
-        <span className="eyebrow">Club</span>
-        <h2>Daily agenda</h2>
-        <p>Post-game reviews, challenge rooms, weekly swiss events, and puzzle ladders live here.</p>
+        <span className="eyebrow">Operations</span>
+        <h2>Production console</h2>
+        <p>Live queues, request telemetry, engine workers, and moderation-ready club controls.</p>
         <div className="drill-list">
-          <span>Club chat</span>
-          <span>Member challenges</span>
-          <span>Study groups</span>
-          <span>Announcements</span>
+          <span>Requests {platform.observability?.requests || 0}</span>
+          <span>Errors {platform.observability?.errors || 0}</span>
+          <span>Engine {platform.engine?.active || 0}/{platform.engine?.size || 1}</span>
+          <span>Queue {platform.matchmaking?.queued || 0}</span>
         </div>
         <button className="primary-action" onClick={() => createRoom('rapid')}>
           Create club challenge
@@ -1293,7 +1392,8 @@ function GameRoom({
   chatInput,
   setChatInput,
   sendChat,
-  leaveRoom
+  leaveRoom,
+  reportRoom
 }) {
   const boardFlipped = flipped || viewerColor === 'b';
   const activeLabel = room.clock.activeColor;
@@ -1315,7 +1415,10 @@ function GameRoom({
             </button>
           </div>
           <input aria-label="Invite link" value={inviteUrl} readOnly />
-          <button onClick={leaveRoom}>Back to hub</button>
+          <div className="room-actions">
+            <button onClick={leaveRoom}>Back to hub</button>
+            <button onClick={reportRoom}>Report</button>
+          </div>
         </div>
 
         <PlayerCard
