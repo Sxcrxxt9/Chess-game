@@ -316,6 +316,7 @@ input:focus {
 
 .stats-strip > div,
 .feature-tile,
+.history-card,
 .play-card,
 .bot-arena,
 .training-panel,
@@ -351,6 +352,32 @@ input:focus {
   min-height: 10rem;
   padding: 1rem;
   text-align: left;
+}
+
+.history-card {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+}
+
+.history-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr) minmax(9rem, auto);
+  gap: 0.75rem;
+  align-items: center;
+  border-top: 1px solid rgba(245, 242, 234, 0.08);
+  padding: 0.65rem 0 0;
+}
+
+.history-row span,
+.history-row em {
+  color: #bcb6aa;
+  font-style: normal;
 }
 
 .feature-tile strong {
@@ -1102,6 +1129,11 @@ input:focus {
   .content-grid,
   .drill-list {
     grid-template-columns: 1fr;
+  }
+
+  .history-row {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
   }
 
   .wide-card {

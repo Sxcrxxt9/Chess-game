@@ -128,6 +128,7 @@ const defaultPlatform = {
   lessons,
   events,
   leaderboard,
+  recentGames: [],
   timeControls
 };
 
@@ -798,6 +799,35 @@ function HomeDashboard({ setActiveSection, createRoom, platform }) {
         <FeatureTile icon="puzzle" title="Puzzles" text="Tactics trainer with hints, solutions, and theme cards." onClick={() => setActiveSection('puzzles')} />
         <FeatureTile icon="analysis" title="Analysis" text="Load FEN, explore legal moves, and inspect move history." onClick={() => setActiveSection('analysis')} />
         <FeatureTile icon="watch" title="Watch" text="Event cards, tournament schedule, and featured games." onClick={() => setActiveSection('watch')} />
+      </div>
+
+      <RecentGames games={platform.recentGames || []} />
+    </section>
+  );
+}
+
+function RecentGames({ games }) {
+  return (
+    <section className="history-card">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">Saved games</span>
+          <h2>Recent history</h2>
+        </div>
+        <strong>{games.length}</strong>
+      </div>
+      <div className="history-list">
+        {games.length ? (
+          games.map((game) => (
+            <div className="history-row" key={game.id}>
+              <span>{game.mode}</span>
+              <strong>{game.color} vs {game.opponent}</strong>
+              <em>{game.result?.reason || `${game.moves} moves`}</em>
+            </div>
+          ))
+        ) : (
+          <p className="empty-state">Finished and active online games will appear here after they are saved.</p>
+        )}
       </div>
     </section>
   );

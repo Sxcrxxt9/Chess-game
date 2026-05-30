@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { AuthError, AuthStore } from './authStore.js';
+import { createPersistenceStore } from './persistenceStore.js';
 import { RoomStore } from './roomStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -11,8 +12,9 @@ const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
 const dataDir = path.join(rootDir, 'data');
 const port = Number(process.env.PORT || 3001);
-const rooms = new RoomStore();
-const auth = new AuthStore({ filePath: path.join(dataDir, 'auth.json') });
+const persistence = await createPersistenceStore({ filePath: path.join(dataDir, 'chess.sqlite') });
+const rooms = new RoomStore({ persistence });
+const auth = new AuthStore({ persistence });
 const streams = new Map();
 const timeControls = {
   bullet: { mode: 'bullet', clockMs: 60_000, incrementMs: 0 },
@@ -20,7 +22,7 @@ const timeControls = {
   rapid: { mode: 'rapid', clockMs: 10 * 60_000, incrementMs: 5_000 },
   daily: { mode: 'daily', clockMs: 24 * 60 * 60_000, incrementMs: 0 }
 };
-const platform = createPlatformState();
+const platform = createPlatformState(persistence);
 
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -34,9 +36,20 @@ const contentTypes = {
   '.ico': 'image/x-icon'
 };
 
-function createPlatformState() {
+function createPlatformState(store) {
+  const defaultLessons = [
+    { id: 'opening', title: 'Opening principles', progress: 86, text: 'Control the center, develop minor pieces, castle before launching attacks.' },
+    { id: 'tactics', title: 'Tactical vision', progress: 58, text: 'Train pins, forks, skewers, discovered attacks, and forcing move checks.' },
+    { id: 'endgames', title: 'Endgame basics', progress: 42, text: 'Convert king and pawn endings with opposition, outside passers, and activity.' }
+  ];
+  const defaultEvents = [
+    { id: 'rapid-arena', title: 'Rapid Arena', status: 'Live', players: 128, time: '10|5', mode: 'rapid' },
+    { id: 'weekend-swiss', title: 'Weekend Swiss', status: 'Registering', players: 64, time: '15|10', mode: 'rapid' },
+    { id: 'puzzle-storm', title: 'Puzzle Storm', status: 'Open', players: 420, time: '3 min', mode: 'blitz' }
+  ];
+
   return {
-    profiles: new Map(),
+    profiles: new Map(store.listProfiles().map((profile) => [profile.clientId, profile])),
     puzzles: [
       {
         id: 'back-rank-1',
@@ -63,17 +76,8 @@ function createPlatformState() {
         hint: 'Check first, then collect the heavy piece.'
       }
     ],
-    lessons: [
-      { id: 'opening', title: 'Opening principles', progress: 86, text: 'Control the center, develop minor pieces, castle before launching attacks.' },
-      { id: 'tactics', title: 'Tactical vision', progress: 58, text: 'Train pins, forks, skewers, discovered attacks, and forcing move checks.' },
-      { id: 'endgames', title: 'Endgame basics', progress: 42, text: 'Convert king and pawn endings with opposition, outside passers, and activity.' }
-    ],
-    events: [
-      { id: 'rapid-arena', title: 'Rapid Arena', status: 'Live', players: 128, time: '10|5', mode: 'rapid' },
-      { id: 'weekend-swiss', title: 'Weekend Swiss', status: 'Registering', players: 64, time: '15|10', mode: 'rapid' },
-      { id: 'puzzle-storm', title: 'Puzzle Storm', status: 'Open', players: 420, time: '3 min', mode: 'blitz' }
-    ],
-    analyses: new Map()
+    lessons: store.getAppState('lessons', defaultLessons),
+    events: store.getAppState('events', defaultEvents)
   };
 }
 
@@ -104,7 +108,13 @@ function profileFor(clientId, name = 'Guest') {
   const profile = platform.profiles.get(id);
   profile.name = cleanName(name || profile.name);
   profile.lastSeen = Date.now();
+  saveProfile(profile);
   return profile;
+}
+
+function saveProfile(profile) {
+  platform.profiles.set(profile.clientId, profile);
+  persistence.saveProfile(profile);
 }
 
 function publicProfile(profile) {
@@ -138,6 +148,7 @@ function platformPayload(clientId = 'guest', name = 'Guest') {
     lessons: platform.lessons,
     events: platform.events,
     leaderboard: leaderboard(),
+    recentGames: rooms.historyForClient(profile.clientId),
     timeControls: [
       { id: 'bullet', label: '1 min', meta: 'Bullet' },
       { id: 'blitz', label: '3|2', meta: 'Blitz' },
@@ -303,7 +314,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === 'GET' && url.pathname === '/api/health') {
-    sendJson(response, 200, { ok: true, uptime: process.uptime() });
+    sendJson(response, 200, { ok: true, uptime: process.uptime(), storage: persistence.stats() });
     return;
   }
 
@@ -388,6 +399,19 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === 'GET' && url.pathname === '/api/history') {
+    const actor = actorFrom(
+      request,
+      {
+        clientId: url.searchParams.get('clientId'),
+        name: url.searchParams.get('name')
+      },
+      url
+    );
+    sendJson(response, 200, { games: rooms.historyForClient(actor.clientId, 30) });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/platform/puzzle-result') {
     const body = await readBody(request);
     const actor = actorFrom(request, body, url);
@@ -434,6 +458,7 @@ const server = createServer(async (request, response) => {
     const profile = profileFor(actor.clientId, actor.name);
     profile.eventsJoined += 1;
     event.players += 1;
+    persistence.saveAppState('events', platform.events);
     const room = rooms.createRoom(timeControls[event.mode] || timeControls.rapid);
     sendJson(response, 200, { ...platformPayload(actor.clientId, actor.name), room: rooms.serialize(room) });
     return;
@@ -447,6 +472,7 @@ const server = createServer(async (request, response) => {
     profile.lessonsCompleted += 1;
     profile.rapid += 1;
     if (lesson) lesson.progress = Math.min(100, lesson.progress + 7);
+    persistence.saveAppState('lessons', platform.lessons);
     sendJson(response, 200, platformPayload(actor.clientId, actor.name));
     return;
   }
@@ -455,18 +481,19 @@ const server = createServer(async (request, response) => {
     const body = await readBody(request);
     const actor = actorFrom(request, body, url);
     const id = `ana-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    platform.analyses.set(id, {
+    const analysis = {
       id,
       fen: String(body.fen || ''),
       name: actor.name,
       createdAt: Date.now()
-    });
-    sendJson(response, 201, { analysis: platform.analyses.get(id) });
+    };
+    persistence.saveAnalysis(analysis);
+    sendJson(response, 201, { analysis });
     return;
   }
 
   if (request.method === 'GET' && parts[1] === 'analysis' && parts[2]) {
-    const analysis = platform.analyses.get(parts[2]);
+    const analysis = persistence.getAnalysis(parts[2]);
     if (!analysis) {
       sendError(response, 404, 'Analysis not found');
       return;

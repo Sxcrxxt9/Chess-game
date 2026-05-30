@@ -43,14 +43,22 @@ function verifyPassword(password, user) {
 }
 
 export class AuthStore {
-  constructor({ filePath } = {}) {
+  constructor({ filePath, persistence } = {}) {
     this.filePath = filePath || path.join(process.cwd(), 'data', 'auth.json');
+    this.persistence = persistence || null;
     this.users = new Map();
     this.sessions = new Map();
     this.load();
   }
 
   load() {
+    if (this.persistence) {
+      this.users = new Map(this.persistence.listUsers().map((user) => [user.id, user]));
+      this.sessions = new Map(this.persistence.listSessions().map((session) => [session.token, session]));
+      this.pruneSessions();
+      return;
+    }
+
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     if (!fs.existsSync(this.filePath)) {
       this.save();
@@ -64,6 +72,11 @@ export class AuthStore {
   }
 
   save() {
+    if (this.persistence) {
+      this.persistence.saveAuthState(Array.from(this.users.values()), Array.from(this.sessions.values()));
+      return;
+    }
+
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     fs.writeFileSync(
       this.filePath,

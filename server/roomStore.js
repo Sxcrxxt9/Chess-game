@@ -66,10 +66,12 @@ function gameResult(game) {
 }
 
 export class RoomStore {
-  constructor({ clockMs = DEFAULT_CLOCK_MS, incrementMs = DEFAULT_INCREMENT_MS } = {}) {
+  constructor({ clockMs = DEFAULT_CLOCK_MS, incrementMs = DEFAULT_INCREMENT_MS, persistence = null } = {}) {
     this.rooms = new Map();
     this.clockMs = clockMs;
     this.incrementMs = incrementMs;
+    this.persistence = persistence;
+    this.restoreRooms();
   }
 
   createRoom(options = {}) {
@@ -97,6 +99,7 @@ export class RoomStore {
     };
 
     this.rooms.set(id, room);
+    this.persistRoom(room);
     return room;
   }
 
@@ -143,6 +146,7 @@ export class RoomStore {
     }
 
     room.updatedAt = now;
+    this.persistRoom(room);
     return this.serialize(room, clientId);
   }
 
@@ -169,6 +173,7 @@ export class RoomStore {
 
       if (changed) {
         room.updatedAt = Date.now();
+        this.persistRoom(room);
         changedRooms.push(room);
       }
     }
@@ -250,6 +255,7 @@ export class RoomStore {
     room.drawOfferBy = null;
     room.rematchVotes.clear();
     room.updatedAt = Date.now();
+    this.persistRoom(room);
 
     return this.serialize(room, clientId);
   }
@@ -268,6 +274,7 @@ export class RoomStore {
     };
     room.activeSince = null;
     room.updatedAt = Date.now();
+    this.persistRoom(room);
     return this.serialize(room, clientId);
   }
 
@@ -285,6 +292,7 @@ export class RoomStore {
     }
 
     room.updatedAt = Date.now();
+    this.persistRoom(room);
     return this.serialize(room, clientId);
   }
 
@@ -293,6 +301,7 @@ export class RoomStore {
     const color = this.getPlayerColor(room, clientId);
     if (room.drawOfferBy === color) room.drawOfferBy = null;
     room.updatedAt = Date.now();
+    this.persistRoom(room);
     return this.serialize(room, clientId);
   }
 
@@ -318,6 +327,7 @@ export class RoomStore {
     }
 
     room.updatedAt = Date.now();
+    this.persistRoom(room);
     return this.serialize(room, clientId);
   }
 
@@ -341,6 +351,7 @@ export class RoomStore {
     });
     room.chat = room.chat.slice(-MAX_CHAT_MESSAGES);
     room.updatedAt = Date.now();
+    this.persistRoom(room);
 
     return this.serialize(room, clientId);
   }
@@ -352,6 +363,7 @@ export class RoomStore {
       this.updateClock(room);
       if (room.result !== previousResult) {
         room.updatedAt = Date.now();
+        this.persistRoom(room);
         changed.push(room);
       }
     }
@@ -374,6 +386,107 @@ export class RoomStore {
     const room = this.getRoom(roomId);
     if (!room) throw new Error('Room not found');
     return room;
+  }
+
+  restoreRooms() {
+    if (!this.persistence) return;
+    for (const state of this.persistence.listRoomStates()) {
+      try {
+        const room = this.hydrateRoom(state);
+        this.rooms.set(room.id, room);
+      } catch {
+        // Ignore corrupted room records instead of blocking server boot.
+      }
+    }
+  }
+
+  hydrateRoom(state) {
+    const game = new Chess();
+    for (const move of state.moves || []) {
+      game.move({ from: move.from, to: move.to, promotion: move.promotion || undefined });
+    }
+
+    const players = {
+      w: state.players?.w ? { ...state.players.w, socketId: null, connected: false } : null,
+      b: state.players?.b ? { ...state.players.b, socketId: null, connected: false } : null
+    };
+
+    const room = {
+      id: state.id,
+      createdAt: state.createdAt || Date.now(),
+      updatedAt: state.updatedAt || Date.now(),
+      game,
+      players,
+      spectators: new Map(),
+      clock: state.clock || { w: this.clockMs, b: this.clockMs },
+      clockMs: state.clockMs || this.clockMs,
+      incrementMs: state.incrementMs || this.incrementMs,
+      mode: state.mode || 'rapid',
+      activeSince: state.result || !players.w || !players.b ? null : Date.now(),
+      result: state.result || null,
+      drawOfferBy: state.drawOfferBy || null,
+      rematchVotes: new Set(state.rematchVotes || []),
+      chat: state.chat || [],
+      lastMove: state.lastMove || null
+    };
+
+    return room;
+  }
+
+  snapshotRoom(room) {
+    return {
+      id: room.id,
+      createdAt: room.createdAt,
+      updatedAt: room.updatedAt,
+      moves: room.game.history({ verbose: true }).map((move) => ({
+        from: move.from,
+        to: move.to,
+        promotion: move.promotion || null
+      })),
+      players: {
+        w: room.players.w
+          ? { clientId: room.players.w.clientId, name: room.players.w.name, connected: false }
+          : null,
+        b: room.players.b
+          ? { clientId: room.players.b.clientId, name: room.players.b.name, connected: false }
+          : null
+      },
+      clock: room.clock,
+      clockMs: room.clockMs,
+      incrementMs: room.incrementMs,
+      mode: room.mode,
+      result: room.result,
+      drawOfferBy: room.drawOfferBy,
+      rematchVotes: Array.from(room.rematchVotes),
+      chat: room.chat,
+      lastMove: room.lastMove,
+      pgn: room.game.pgn(),
+      fen: room.game.fen()
+    };
+  }
+
+  persistRoom(room) {
+    this.persistence?.saveRoomState(this.snapshotRoom(room));
+  }
+
+  historyForClient(clientId, limit = 12) {
+    return Array.from(this.rooms.values())
+      .filter((room) => room.players.w?.clientId === clientId || room.players.b?.clientId === clientId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, limit)
+      .map((room) => {
+        const color = room.players.w?.clientId === clientId ? 'white' : 'black';
+        const opponent = color === 'white' ? room.players.b : room.players.w;
+        return {
+          id: room.id,
+          color,
+          opponent: opponent?.name || 'Waiting',
+          result: room.result,
+          moves: room.game.history().length,
+          mode: room.mode,
+          updatedAt: room.updatedAt
+        };
+      });
   }
 
   serialize(room, viewerClientId = null) {

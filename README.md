@@ -18,6 +18,8 @@ A production-minded realtime chess project built with React, native HTTP, Server
 - Separate player identity per browser tab
 - Room chat and copyable invite link
 - Responsive desktop/mobile layout
+- Register/login/logout/edit profile with salted password hashing
+- Durable SQLite-backed storage for accounts, sessions, profiles, rooms, moves, chat, analysis saves, event state, and recent game history
 
 ## Local Development
 
@@ -28,6 +30,8 @@ npm run dev
 
 The app builds and runs from one server at `http://localhost:3001`.
 
+Runtime data is stored in `data/chess.sqlite`. Keep the `data` directory mounted as persistent storage in production.
+
 ## Production
 
 ```bash
@@ -37,6 +41,8 @@ npm start
 ```
 
 `npm start` serves the built client from `dist` and the realtime HTTP/SSE server from the same process.
+
+Production health is available at `GET /api/health`; it returns uptime and storage counts.
 
 ## Checks
 
